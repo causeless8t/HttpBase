@@ -2,7 +2,7 @@
   "name": "com.causeless3t.httpbase",
   "version": "1.0.0",
   "displayName": "HttpBase",
-  "description": "데이터 테이블",
+  "description": "Http Base",
   "changelogUrl": "https://github.com/causeless8t/HttpBase.git/Assets/Deploy/CHANGELOG.md",
   "documentationUrl": "https://github.com/causeless8t/HttpBase.git/Assets/Deploy/README.md",
   "licensesUrl": "https://github.com/causeless8t/HttpBase.git/Assets/Deploy/LICENSE.md",
