@@ -1,18 +1,32 @@
-using System.Collections;
-using System.Collections.Generic;
-using UnityEngine;
+using System;
+using UnityEngine.Pool;
 
-public class BaseRequestHandler : MonoBehaviour
+namespace Causeless3t.Network
 {
-    // Start is called before the first frame update
-    void Start()
+    [AttributeUsage(AttributeTargets.Class)]
+    public class APIAttribute : Attribute
     {
-        
+        public string API { get; }
+
+        public APIAttribute(string api) => API = api;
     }
 
-    // Update is called once per frame
-    void Update()
+    public abstract class BaseRequestHandler
     {
+        protected abstract string API { get; }
         
+        protected static readonly IObjectPool<RequestInfo> RequestInfoPool = new ObjectPool<RequestInfo>(() => new RequestInfo());
+
+        public virtual RequestInfo CreateRequest(int packetNum) => RequestInfoPool.Get();
+
+        public abstract void Parse(RequestInfo requestInfo, string response);
+
+        public virtual void ErrorProcess(RequestInfo requestInfo, string response, int error) { }
+
+        public virtual void ReleasePacket(RequestInfo info)
+        {
+            info.Reset();
+            RequestInfoPool.Release(info);
+        }
     }
 }
