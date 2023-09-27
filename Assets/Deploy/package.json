@@ -4,8 +4,6 @@
   "displayName": "HttpBase",
   "description": "Http Base",
   "changelogUrl": "https://github.com/causeless8t/HttpBase.git/Assets/Deploy/CHANGELOG.md",
-  "documentationUrl": "https://github.com/causeless8t/HttpBase.git/Assets/Deploy/README.md",
-  "licensesUrl": "https://github.com/causeless8t/HttpBase.git/Assets/Deploy/LICENSE.md",
   "unity": "2022.3",
   "author": "causeless3t",
   "keywords": [
