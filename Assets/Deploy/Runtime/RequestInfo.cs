@@ -1,29 +1,35 @@
 
+using System;
+
 namespace Causeless3t.Network
 {
     public sealed class RequestInfo
     {
+        private static readonly int MaxRetryCount = 3;
+        
         public enum eRequestState
         {
             Ready = 0,
             InProgress,
             Retrying,
-            Completed
         }
 
         public eRequestState State { get; set; }
         public string Protocol { get; private set; }
         public int PacketNumber { get; private set; }
-        public byte[] Body { get; private set; }
+        public string Body { get; private set; }
         public int RetryCount { get; private set; }
+        
+        public Action<RequestInfo, string> CustomCallback { get; private set; }
 
-        public void SetInfo(string protocol, int packetNum, byte[] body)
+        public void SetInfo(string protocol, int packetNum, string body, Action<RequestInfo, string> callback = null)
         {
             State = eRequestState.Ready;
             Protocol = protocol;
             PacketNumber = packetNum;
             Body = body;
             RetryCount = 0;
+            CustomCallback = callback;
         }
 
         public void Reset()
@@ -33,13 +39,14 @@ namespace Causeless3t.Network
             PacketNumber = 0;
             Body = null;
             RetryCount = 0;
+            CustomCallback = null;
         }
 
-        public void Retry(int packetNum)
+        public bool Retry(int packetNum)
         {
             PacketNumber = packetNum;
             State = eRequestState.Retrying;
-            RetryCount++;
+            return ++RetryCount < MaxRetryCount;
         }
     }
 }

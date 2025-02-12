@@ -1,5 +1,6 @@
 
 using Causeless3t.Core;
+using UnityEngine;
 
 namespace Causeless3t.Network
 {
@@ -7,9 +8,10 @@ namespace Causeless3t.Network
     {
         public void TestAPI(int param)
         {
-            if (HttpManager.Instance.GetHandler("sample/test") is not SampleRequest handler) return;
-            handler.SamepleParam = param;
-            HttpManager.Instance.EnqueuePacket(handler);
+            HttpManager.Instance.GetHandler<SampleHandler>().EnqueueRequest(param, (req, recv) =>
+            {
+                Debug.Log($"{req.Protocol}\nrecv => {recv}");
+            });
         }
     }
 }
