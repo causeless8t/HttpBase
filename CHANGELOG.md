@@ -1,60 +1,60 @@
-# Changelog
+# 변경 이력
 
-All notable changes to this project will be documented in this file.
+이 프로젝트의 주요 변경 사항을 이 문서에 기록합니다.
 
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
-and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+문서 형식은 [변경 이력 유지하기](https://keepachangelog.com/ko/1.0.0/)를 따르며,
+버전은 [유의적 버전](https://semver.org/lang/ko/) 규칙을 따릅니다.
 
 ## [2.0.0] - 2026-09-16
 
-### Changed
+### 변경
 
-- Moved the repository to a root Unity Package Manager structure.
-- Replaced the UnityCore Singleton dependency with an independent MonoBehaviour.
-- Replaced UniTask with Unity coroutines.
-- Added immutable HttpManagerOptions configuration.
-- Changed Handler discovery to explicit assembly registration.
-- Added manual Handler registration with Manager binding.
-- Isolated request message and callback state from Handler instances.
-- Changed in-progress request tracking from Queue to HashSet.
-- Centralized request completion and pool release.
-- Distinguished connection, HTTP protocol, and response processing errors.
-- Added Manager lifetime cancellation and deterministic request cleanup.
-- Isolated collapsible request state and delay handling per API.
-- Updated retry semantics so MaxRetryAttempts excludes the initial request.
+- 저장소를 루트 Unity Package Manager 패키지 구조로 변경했습니다.
+- UnityCore의 싱글턴 의존성을 제거하고 독립적인 `MonoBehaviour`로 변경했습니다.
+- UniTask를 Unity 코루틴으로 교체했습니다.
+- 생성 후 변경할 수 없는 `HttpManagerOptions` 설정 객체를 추가했습니다.
+- 핸들러 탐색 방식을 명시적인 어셈블리 등록 방식으로 변경했습니다.
+- 매니저에 연결되는 핸들러 인스턴스 수동 등록 기능을 추가했습니다.
+- 요청 메시지와 콜백 상태를 핸들러 인스턴스로부터 분리했습니다.
+- 진행 중인 요청 추적 자료구조를 `Queue`에서 `HashSet`으로 변경했습니다.
+- 요청 완료 처리와 오브젝트 풀 반환 절차를 한곳으로 통합했습니다.
+- 연결 오류, HTTP 오류 응답, 응답 데이터 처리 오류를 구분하도록 변경했습니다.
+- 매니저 수명 종료에 따른 취소와 확정적인 요청 정리 절차를 추가했습니다.
+- API별로 병합 요청 상태와 지연 처리를 독립적으로 관리하도록 변경했습니다.
+- `MaxRetryAttempts`가 최초 요청을 제외한 재시도 횟수를 의미하도록 명확히 했습니다.
 
-### Fixed
+### 수정
 
-- Fixed callbacks being shared or overwritten between requests.
-- Fixed incorrect request removal when responses complete out of order.
-- Fixed RequestInfo not being released after retry exhaustion.
-- Fixed HTTP 4xx and 5xx responses being retried as connection failures.
-- Fixed null dereferencing when a response Handler was unavailable.
-- Fixed one API canceling another API's collapsible request delay.
+- 여러 요청의 콜백이 공유되거나 덮어써지는 문제를 수정했습니다.
+- 응답 순서가 요청 순서와 다를 때 잘못된 요청이 제거되는 문제를 수정했습니다.
+- 재시도 횟수를 모두 소진한 뒤 `RequestInfo`가 반환되지 않는 문제를 수정했습니다.
+- HTTP 4xx 및 5xx 응답을 연결 오류로 간주하여 재시도하던 문제를 수정했습니다.
+- 응답 핸들러가 없을 때 null 참조가 발생하는 문제를 수정했습니다.
+- 한 API의 병합 요청이 다른 API의 지연 전송을 취소하는 문제를 수정했습니다.
 
-### Removed
+### 제거
 
-- Removed the UnityCore dependency.
-- Removed the UniTask dependency.
-- Removed the embedded Unity test project structure.
+- UnityCore 의존성을 제거했습니다.
+- UniTask 의존성을 제거했습니다.
+- 저장소에 포함되어 있던 Unity 테스트 프로젝트 구조를 제거했습니다.
 
 ## [1.0.1] - 2025-02-12
 
-### Changed
+### 변경
 
-- Updated IRequestHandler request processing.
-- Updated HttpManager Handler processing and initialization.
-- Added collapsible request processing.
-- Added custom response callbacks.
+- `IRequestHandler`의 요청 처리 방식을 개선했습니다.
+- `HttpManager`의 핸들러 처리 및 초기화 방식을 개선했습니다.
+- 병합 요청 처리 기능을 추가했습니다.
+- 사용자 정의 응답 콜백을 추가했습니다.
 
-### Added
+### 추가
 
-- Added BaseMessage and SampleMessage examples.
+- `BaseMessage`와 `SampleMessage` 예제를 추가했습니다.
 
 ## [1.0.0] - 2023-09-27
 
-### Added
+### 추가
 
-- Added the initial RequestHandler base implementation.
-- Added the Singleton-based HttpManager.
-- Added RequestInfo.
+- 최초 `RequestHandler` 기반 구현을 추가했습니다.
+- 싱글턴 기반 `HttpManager`를 추가했습니다.
+- `RequestInfo`를 추가했습니다.
