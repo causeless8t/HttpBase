@@ -38,16 +38,36 @@ namespace Causeless3t.Network
         private int _packetNumber;
         public int PacketNumber => _packetNumber;
 
-        public void Initialize()
+        public void Initialize(params Assembly[] handlerAssemblies)
         {
+            if (handlerAssemblies == null || handlerAssemblies.Length == 0)
+            {
+                throw new ArgumentException(
+                    "At least one Handler assembly is required.",
+                    nameof(handlerAssemblies));
+            }
+
+            if (handlerAssemblies.Any(assembly => assembly == null))
+            {
+                throw new ArgumentException(
+                    "Handler assemblies cannot contain null.",
+                    nameof(handlerAssemblies));
+            }
+
             Dispose();
             _lifetimeCTS = new CancellationTokenSource();
 
-            var types = Assembly.GetExecutingAssembly()
-                .GetTypes()
-                .Where(t => t.IsDefined(typeof(APIAttribute)));
+            try
+            {
+                foreach (var assembly in handlerAssemblies.Distinct())
+                    RegisterHandlersFrom(assembly);
+            }
+            catch
+            {
+                Dispose();
+                throw;
+            }
 
-            RegisterRequestHandler(types);
             _packetNumber = 0;
         }
 
@@ -164,18 +184,74 @@ namespace Causeless3t.Network
             }
         }
 
-        private void RegisterRequestHandler(IEnumerable<Type> types)
+        public int RegisterHandlersFrom(Assembly assembly)
         {
-            _requestHandlers.Clear();
-            Debug.Log("Register Request Handler");
+            ThrowIfNotInitialized();
 
-            foreach (var type in types)
+            if (assembly == null)
+                throw new ArgumentNullException(nameof(assembly));
+
+            var handlerTypes = assembly
+                .GetTypes()
+                .Where(type =>
+                    type.IsClass &&
+                    !type.IsAbstract &&
+                    typeof(IRequestHandler).IsAssignableFrom(type) &&
+                    type.IsDefined(typeof(APIAttribute)))
+                .ToArray();
+
+            foreach (var handlerType in handlerTypes)
             {
-                Debug.Log($"-> {type.Name}");
-                IRequestHandler requestHandler = Activator.CreateInstance(type) as IRequestHandler;
-                _requestHandlers.TryAdd(type.GetCustomAttribute<APIAttribute>().API, requestHandler);
-                Debug.Log($"-> {type.Name}...DONE");
+                if (handlerType.GetConstructor(Type.EmptyTypes) == null)
+                {
+                    throw new InvalidOperationException(
+                        $"{handlerType.FullName} must have a public parameterless constructor.");
+                }
+
+                IRequestHandler handler;
+
+                try
+                {
+                    handler = (IRequestHandler)Activator.CreateInstance(handlerType);
+                }
+                catch (Exception exception)
+                {
+                    throw new InvalidOperationException(
+                        $"Failed to create {handlerType.FullName}.",
+                        exception);
+                }
+
+                RegisterHandler(handler);
             }
+
+            return handlerTypes.Length;
+        }
+
+        public void RegisterHandler(IRequestHandler handler)
+        {
+            ThrowIfNotInitialized();
+
+            if (handler == null)
+                throw new ArgumentNullException(nameof(handler));
+
+            if (string.IsNullOrWhiteSpace(handler.API))
+            {
+                throw new InvalidOperationException(
+                    $"{handler.GetType().FullName} does not define a valid API path.");
+            }
+
+            if (!_requestHandlers.TryAdd(handler.API, handler))
+            {
+                var registeredType = _requestHandlers[handler.API].GetType();
+
+                throw new InvalidOperationException(
+                    $"The API path '{handler.API}' is already registered by " +
+                    $"{registeredType.FullName}.");
+            }
+
+            Debug.Log(
+                $"Registered HTTP Handler: {handler.API} -> " +
+                $"{handler.GetType().FullName}");
         }
 
         public IRequestHandler GetHandler(string api)
