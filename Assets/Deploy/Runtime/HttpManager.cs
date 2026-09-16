@@ -1,10 +1,9 @@
 using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
 using System.Net;
 using System.Reflection;
-using System.Threading;
-using Cysharp.Threading.Tasks;
 using UnityEngine;
 using UnityEngine.Networking;
 
@@ -14,25 +13,21 @@ namespace Causeless3t.Network
     {
         private const int InvalidResponseError = -1;
 
-        private sealed class PendingCollapsibleRequest : IDisposable
+        private sealed class PendingCollapsibleRequest
         {
             public IRequestHandler Handler { get; }
             public ICollapsableRequest Request { get; }
             public Action<RequestInfo, string> Callback { get; private set; }
-            public CancellationTokenSource CancellationSource { get; }
+            public Coroutine DelayCoroutine { get; set; }
 
             public PendingCollapsibleRequest(
                 IRequestHandler handler,
                 ICollapsableRequest request,
-                Action<RequestInfo, string> callback,
-                CancellationToken lifetimeToken)
+                Action<RequestInfo, string> callback)
             {
                 Handler = handler;
                 Request = request;
                 Callback = callback;
-                CancellationSource =
-                    CancellationTokenSource.CreateLinkedTokenSource(
-                        lifetimeToken);
             }
 
             public void Collapse(
@@ -42,16 +37,6 @@ namespace Causeless3t.Network
                 Request.Collapse(request);
                 Callback += callback;
             }
-
-            public void Cancel()
-            {
-                CancellationSource.Cancel();
-            }
-
-            public void Dispose()
-            {
-                CancellationSource.Dispose();
-            }
         }
 
         private readonly Dictionary<string, IRequestHandler> _requestHandlers = new();
@@ -60,9 +45,14 @@ namespace Causeless3t.Network
         private readonly Dictionary<string, PendingCollapsibleRequest>
             _pendingCollapsibleRequests = new();
 
-        private HttpManagerOptions _options;
-        private CancellationTokenSource _lifetimeCTS;
         private readonly HashSet<RequestInfo> _inProgressRequests = new();
+        private readonly HashSet<RequestInfo> _retryingRequests = new();
+
+        private readonly Dictionary<RequestInfo, UnityWebRequest>
+            _activeWebRequests = new();
+
+        private HttpManagerOptions _options;
+        private bool _isInitialized;
 
         private int _packetNumber;
         public int PacketNumber => _packetNumber;
@@ -86,7 +76,7 @@ namespace Causeless3t.Network
 
             Dispose();
             _options = options;
-            _lifetimeCTS = new CancellationTokenSource();
+            _isInitialized = true;
 
             try
             {
@@ -145,55 +135,40 @@ namespace Causeless3t.Network
                 FlushPendingBundle(handler.API, pendingRequest);
             }
 
-            var lifetimeToken =
-                _lifetimeCTS?.Token ?? CancellationToken.None;
-
             var newPendingRequest = new PendingCollapsibleRequest(
                 handler,
                 request,
-                callback,
-                lifetimeToken);
+                callback);
 
             _pendingCollapsibleRequests.Add(
                 handler.API,
                 newPendingRequest);
 
-            DelayedSendBundlePacket(
+            newPendingRequest.DelayCoroutine = StartCoroutine(
+                DelayedSendBundlePacket(
                     handler.API,
-                    newPendingRequest)
-                .Forget();
+                    newPendingRequest));
         }
 
-        private async UniTask DelayedSendBundlePacket(
+        private IEnumerator DelayedSendBundlePacket(
             string api,
             PendingCollapsibleRequest pendingRequest)
         {
-            try
-            {
-                await UniTask.WaitForSeconds(
-                    _options.BundleDelaySeconds,
-                    cancellationToken:
-                        pendingRequest.CancellationSource.Token);
+            yield return new WaitForSecondsRealtime(
+                _options.BundleDelaySeconds);
 
-                if (!_pendingCollapsibleRequests.TryGetValue(
-                        api,
-                        out var currentRequest) ||
-                    !ReferenceEquals(currentRequest, pendingRequest))
-                {
-                    return;
-                }
+            if (!_isInitialized ||
+                !_pendingCollapsibleRequests.TryGetValue(
+                    api,
+                    out var currentRequest) ||
+                !ReferenceEquals(currentRequest, pendingRequest))
+            {
+                yield break;
+            }
 
-                _pendingCollapsibleRequests.Remove(api);
-                QueueBundleRequest(pendingRequest);
-            }
-            catch (OperationCanceledException)
-            {
-                // Dispose 또는 동일 API의 새로운 병합 그룹에 의해 취소되었습니다.
-            }
-            finally
-            {
-                pendingRequest.Dispose();
-            }
+            _pendingCollapsibleRequests.Remove(api);
+            pendingRequest.DelayCoroutine = null;
+            QueueBundleRequest(pendingRequest);
         }
 
         private void FlushPendingBundle(
@@ -209,7 +184,13 @@ namespace Causeless3t.Network
             }
 
             _pendingCollapsibleRequests.Remove(api);
-            pendingRequest.Cancel();
+
+            if (pendingRequest.DelayCoroutine != null)
+            {
+                StopCoroutine(pendingRequest.DelayCoroutine);
+                pendingRequest.DelayCoroutine = null;
+            }
+
             QueueBundleRequest(pendingRequest);
         }
 
@@ -316,24 +297,28 @@ namespace Causeless3t.Network
 
         private void Update()
         {
-            if (_lifetimeCTS == null || _lifetimeCTS.IsCancellationRequested)
+            if (!_isInitialized)
                 return;
 
-            for (int i = 0; i < _requestWaitingQueue.Count; ++i)
+            while (_requestWaitingQueue.Count > 0 &&
+                   _inProgressRequests.Count <
+                   _options.MaxConcurrentRequests)
             {
-                if (_inProgressRequests.Count >= _options.MaxConcurrentRequests)
-                    break;
-
                 var request = _requestWaitingQueue.Dequeue();
-                SendPacket(request).Forget();
+                StartCoroutine(SendPacket(request));
             }
         }
 
-        private async UniTask SendPacket(RequestInfo info)
+        private IEnumerator SendPacket(RequestInfo info)
         {
-            WWWForm formData = new WWWForm();
-            byte[] bytes = new System.Text.UTF8Encoding().GetBytes(info.Body);
-            using var www = UnityWebRequest.Post(_options.BuildUrl(info.Protocol), formData);
+            var formData = new WWWForm();
+            var bytes =
+                new System.Text.UTF8Encoding().GetBytes(info.Body);
+
+            var www = UnityWebRequest.Post(
+                _options.BuildUrl(info.Protocol),
+                formData);
+
             www.uploadHandler = new UploadHandlerRaw(bytes);
             www.downloadHandler = new DownloadHandlerBuffer();
             // www.SetRequestHeader("Content-Type", "application/json");
@@ -343,104 +328,120 @@ namespace Causeless3t.Network
 
             info.State = RequestInfo.eRequestState.InProgress;
             _inProgressRequests.Add(info);
+            _activeWebRequests.Add(info, www);
 
-            float elapsedTime = Time.realtimeSinceStartup;
-
-            var cancellationToken =
-                _lifetimeCTS?.Token ?? CancellationToken.None;
+            var elapsedTime = Time.realtimeSinceStartup;
 
             try
             {
-                await www.SendWebRequest().WithCancellation(cancellationToken);
-            }
-            catch (OperationCanceledException)
-            {
-                CompleteRequest(info);
-                return;
-            }
+                yield return www.SendWebRequest();
 
-            if (www.result == UnityWebRequest.Result.ConnectionError)
-            {
-                var error = www.error;
+                if (!_isInitialized)
+                    yield break;
 
-                if (Application.internetReachability == NetworkReachability.NotReachable)
+                if (www.result ==
+                    UnityWebRequest.Result.ConnectionError)
                 {
-                    Debug.LogErrorFormat(
-                        "network is not reachable !! {0}",
-                        error);
+                    var error = www.error;
+
+                    if (Application.internetReachability ==
+                        NetworkReachability.NotReachable)
+                    {
+                        Debug.LogErrorFormat(
+                            "network is not reachable !! {0}",
+                            error);
+                    }
+                    else
+                    {
+                        Debug.LogErrorFormat(
+                            "connection error in {0}sec !! {1}",
+                            Time.realtimeSinceStartup - elapsedTime,
+                            error);
+                    }
+
+                    StartCoroutine(RetryProcess(error, info));
+                    yield break;
                 }
-                else
+
+                if (www.result ==
+                    UnityWebRequest.Result.DataProcessingError)
                 {
-                    Debug.LogErrorFormat(
-                        "connection error in {0}sec !! {1}",
-                        Time.realtimeSinceStartup - elapsedTime,
-                        error);
+                    FailRequest(
+                        info,
+                        www.error ??
+                        "Failed to process the response data.",
+                        InvalidResponseError);
+
+                    yield break;
                 }
 
-                RetryProcess(error, info).Forget();
-                return;
-            }
+                if (www.result ==
+                    UnityWebRequest.Result.InProgress)
+                {
+                    FailRequest(
+                        info,
+                        "The request did not complete.",
+                        InvalidResponseError);
 
-            if (www.result == UnityWebRequest.Result.DataProcessingError)
-            {
-                FailRequest(
-                    info,
-                    www.error ?? "Failed to process the response data.",
-                    InvalidResponseError);
+                    yield break;
+                }
 
-                return;
-            }
+                var recv = www.downloadHandler.text;
+                var handler = info.Handler;
 
-            if (www.result == UnityWebRequest.Result.InProgress)
-            {
-                FailRequest(
-                    info,
-                    "The request did not complete.",
-                    InvalidResponseError);
+                if (handler == null &&
+                    info.CustomCallback == null)
+                {
+                    Debug.LogError(
+                        $"{info.Protocol} 요청을 처리할 Handler와 커스텀 콜백이 없습니다.");
 
-                return;
-            }
+                    CompleteRequest(info);
+                    yield break;
+                }
 
-            var recv = www.downloadHandler.text;
-            var handler = info.Handler;
+                var httpStatusCode =
+                    (HttpStatusCode)www.responseCode;
 
-            if (handler == null && info.CustomCallback == null)
-            {
-                Debug.LogError(
-                    $"{info.Protocol} 요청을 처리할 Handler와 커스텀 콜백이 없습니다.");
+                if (www.result ==
+                        UnityWebRequest.Result.Success &&
+                    string.IsNullOrEmpty(recv))
+                {
+                    FailRequest(
+                        info,
+                        $"{info.Protocol} returned an empty response.",
+                        InvalidResponseError);
 
-                CompleteRequest(info);
-                return;
-            }
+                    yield break;
+                }
 
-            var httpStatusCode = (HttpStatusCode)www.responseCode;
+                try
+                {
+                    ParsePacketProcess(
+                        handler,
+                        info,
+                        httpStatusCode,
+                        recv);
+                }
+                catch (Exception exception)
+                {
+                    var handlerName =
+                        handler?.GetType().Name ??
+                        "CustomCallback";
 
-            if (www.result == UnityWebRequest.Result.Success &&
-                string.IsNullOrEmpty(recv))
-            {
-                FailRequest(
-                    info,
-                    $"{info.Protocol} returned an empty response.",
-                    InvalidResponseError);
+                    Debug.LogError(
+                        $"{handlerName}에서 {info.Protocol} 응답을 처리하는데 실패했습니다.");
 
-                return;
-            }
-
-            try
-            {
-                ParsePacketProcess(handler, info, httpStatusCode, recv);
-            }
-            catch (Exception e)
-            {
-                var handlerName = handler?.GetType().Name ?? "CustomCallback";
-                Debug.LogError(
-                    $"{handlerName}에서 {info.Protocol} 응답을 처리하는데 실패했습니다.");
-
-                Debug.LogError($"{e}");
+                    Debug.LogError($"{exception}");
+                }
+                finally
+                {
+                    CompleteRequest(info);
+                }
             }
             finally
             {
-                CompleteRequest(info);
+                _activeWebRequests.Remove(info);
+                www.Dispose();
             }
         }
 
@@ -509,7 +510,9 @@ namespace Causeless3t.Network
             }
         }
 
-        private async UniTask RetryProcess(string error, RequestInfo info)
+        private IEnumerator RetryProcess(
+            string error,
+            RequestInfo info)
         {
             _inProgressRequests.Remove(info);
 
@@ -519,27 +522,20 @@ namespace Causeless3t.Network
             {
                 Debug.LogError(error);
                 CompleteRequest(info);
-                return;
+                yield break;
             }
 
             _packetNumber++;
+            _retryingRequests.Add(info);
 
-            var cancellationToken =
-                _lifetimeCTS?.Token ?? CancellationToken.None;
+            yield return new WaitForSecondsRealtime(
+                _options.RetryDelaySeconds);
 
-            try
-            {
-                await UniTask.WaitForSeconds(
-                    _options.RetryDelaySeconds,
-                    cancellationToken: cancellationToken);
+            if (!_isInitialized)
+                yield break;
 
-                cancellationToken.ThrowIfCancellationRequested();
-                _requestWaitingQueue.Enqueue(info);
-            }
-            catch (OperationCanceledException)
-            {
-                CompleteRequest(info);
-            }
+            _retryingRequests.Remove(info);
+            _requestWaitingQueue.Enqueue(info);
         }
 
         private void CompleteRequest(RequestInfo info)
@@ -548,6 +544,7 @@ namespace Causeless3t.Network
                 return;
 
             _inProgressRequests.Remove(info);
+            _retryingRequests.Remove(info);
 
             var handler = info.Handler;
             if (handler == null)
@@ -561,9 +558,8 @@ namespace Causeless3t.Network
 
         private void ThrowIfNotInitialized()
         {
-            if (_options == null ||
-                _lifetimeCTS == null ||
-                _lifetimeCTS.IsCancellationRequested)
+            if (!_isInitialized ||
+                _options == null)
             {
                 throw new InvalidOperationException(
                     "HttpManager.Initialize() must be called before enqueueing requests.");
@@ -572,27 +568,46 @@ namespace Causeless3t.Network
 
         public void Dispose()
         {
-            var lifetimeCTS = _lifetimeCTS;
-            _lifetimeCTS = null;
+            _isInitialized = false;
 
-            var pendingRequests =
-                _pendingCollapsibleRequests.Values.ToArray();
+            foreach (var webRequest in
+                     _activeWebRequests.Values.ToArray())
+            {
+                webRequest.Abort();
+            }
 
+            StopAllCoroutines();
+
+            foreach (var webRequest in
+                     _activeWebRequests.Values.ToArray())
+            {
+                webRequest.Dispose();
+            }
+
+            _activeWebRequests.Clear();
             _pendingCollapsibleRequests.Clear();
 
-            foreach (var pendingRequest in pendingRequests)
-                pendingRequest.Cancel();
+            while (_requestWaitingQueue.TryDequeue(
+                       out var waitingRequest))
+            {
+                CompleteRequest(waitingRequest);
+            }
 
-            lifetimeCTS?.Cancel();
+            foreach (var request in
+                     _inProgressRequests.ToArray())
+            {
+                CompleteRequest(request);
+            }
 
-            while (_requestWaitingQueue.TryDequeue(out var requestInfo))
-                CompleteRequest(requestInfo);
+            foreach (var request in
+                     _retryingRequests.ToArray())
+            {
+                CompleteRequest(request);
+            }
 
             _requestHandlers.Clear();
             _options = null;
             _packetNumber = 0;
-
-            lifetimeCTS?.Dispose();
         }
 
         private void OnDestroy()
