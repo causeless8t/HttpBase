@@ -1,22 +1,22 @@
 # HttpBase
 
-Unity 프로젝트에서 Handler 기반 JSON HTTP 요청을 구성하기 위한 경량 UPM 패키지입니다.
+Unity 프로젝트에서 핸들러 기반 JSON HTTP 요청을 구성하기 위한 경량 UPM 패키지입니다.
 
-`HttpManager`가 요청 대기열, 동시 실행 제한, 연결 오류 재시도, 요청 병합과 수명 주기를 관리합니다. 각 API의 요청 생성, 응답 파싱 및 오류 처리는 `RequestHandler` 구현에서 정의합니다.
+`HttpManager`가 요청 대기열, 동시 실행 제한, 연결 오류 재시도, 요청 병합과 수명 주기를 관리합니다. 각 API의 요청 생성, 응답 해석 및 오류 처리는 `RequestHandler` 구현에서 정의합니다.
 
 ## 주요 기능
 
 - `UnityWebRequest` 기반 JSON POST 요청
-- Handler 어셈블리 자동 등록 및 인스턴스 수동 등록
+- 핸들러 어셈블리 자동 등록 및 인스턴스 수동 등록
 - 최대 동시 요청 수 제한
 - 연결 오류 재시도
 - API별 요청 병합과 지연 전송
 - 요청별 메시지와 콜백 격리
 - 응답 완료 순서와 무관한 진행 요청 추적
 - `RequestInfo` 오브젝트 풀링
-- Manager 종료 시 대기·진행·재시도 요청 정리
+- 매니저 종료 시 대기·진행·재시도 요청 정리
 - UnityCore, UniTask 등 외부 패키지 의존성 없음
-- IL2CPP Handler 보존을 위한 `APIAttribute : PreserveAttribute`
+- IL2CPP 핸들러 보존을 위한 `APIAttribute : PreserveAttribute`
 
 ## 요구 사항
 
@@ -24,7 +24,7 @@ Unity 프로젝트에서 Handler 기반 JSON HTTP 요청을 구성하기 위한 
 
 ## 설치
 
-Unity Package Manager에서 **Add package from git URL...**을 선택하고 다음 주소를 입력합니다.
+Unity Package Manager에서 **Add package from git URL...** 메뉴를 선택하고 다음 주소를 입력합니다.
 
 ```text
 https://github.com/causeless8t/HttpBase.git
@@ -50,7 +50,7 @@ https://github.com/causeless8t/HttpBase.git#2.0.0
 
 ### 1. HttpManager 배치
 
-Scene의 GameObject에 `HttpManager` 컴포넌트를 추가합니다. 패키지는 Singleton을 강제하지 않으므로 프로젝트의 서비스 구조에 맞게 참조하거나 감싸서 사용합니다.
+씬의 GameObject에 `HttpManager` 컴포넌트를 추가합니다. 패키지는 싱글턴을 강제하지 않으므로 프로젝트의 서비스 구조에 맞게 참조하거나 감싸서 사용합니다.
 
 ```csharp
 using UnityEngine;
@@ -77,7 +77,7 @@ public sealed class GameBootstrap : MonoBehaviour
 }
 ```
 
-`Initialize()`에 전달된 어셈블리에서 구체 클래스이고 `IRequestHandler`를 구현하며 `[API]`가 붙은 타입을 등록합니다.
+`Initialize()`에 전달한 어셈블리에서 구체 클래스이면서 `IRequestHandler`를 구현하고 `[API]`가 붙은 타입을 자동으로 등록합니다.
 
 ### 2. 요청과 응답 정의
 
@@ -99,7 +99,7 @@ public sealed class LoginResponse : BaseResponse
 }
 ```
 
-### 3. Handler 구현
+### 3. 핸들러 구현
 
 ```csharp
 [API("auth/login")]
@@ -131,7 +131,7 @@ public sealed class LoginHandler
 }
 ```
 
-`[API]`가 붙은 Handler는 자동 등록 대상이며 public 기본 생성자가 필요합니다. `APIAttribute`가 `PreserveAttribute`를 상속하므로 Reflection으로 생성하는 Handler와 기본 생성자가 IL2CPP 스트리핑에서 보존됩니다.
+`[API]`가 붙은 핸들러는 자동 등록 대상이며 공개 기본 생성자가 필요합니다. `APIAttribute`가 `PreserveAttribute`를 상속하므로 리플렉션으로 생성하는 핸들러와 기본 생성자가 IL2CPP 스트리핑 과정에서 보존됩니다.
 
 ### 4. 요청 전송
 
@@ -147,11 +147,11 @@ handler.EnqueueRequest(
     });
 ```
 
-콜백과 `Process()`는 응답 처리 중 Unity 메인 스레드에서 호출됩니다.
+콜백과 `Process()`는 응답 처리 중 Unity 주 스레드에서 호출됩니다.
 
-## 수동 Handler 등록
+## 수동 핸들러 등록
 
-생성자 의존성이 있는 Handler에는 `[API]`를 붙이지 않고 `API`를 override합니다.
+생성자 의존성이 있는 핸들러에는 `[API]`를 붙이지 않고 `API`를 override합니다.
 
 ```csharp
 public sealed class LoginHandler
@@ -180,7 +180,7 @@ public sealed class LoginHandler
 }
 ```
 
-먼저 Manager를 초기화한 뒤 인스턴스를 등록합니다.
+먼저 매니저를 초기화한 뒤 인스턴스를 등록합니다.
 
 ```csharp
 _httpManager.Initialize(options);
@@ -190,7 +190,7 @@ _httpManager.RegisterHandler(
 
 | 등록 방식 | `[API]` | public 기본 생성자 | API 경로 |
 | --- | ---: | ---: | --- |
-| 어셈블리 자동 등록 | 필요 | 필요 | Attribute 값 |
+| 어셈블리 자동 등록 | 필요 | 필요 | 특성 값 |
 | 인스턴스 수동 등록 | 불필요 | 불필요 | `API` override |
 
 ## HttpManagerOptions
@@ -198,13 +198,13 @@ _httpManager.RegisterHandler(
 | 옵션 | 기본값 | 설명 |
 | --- | ---: | --- |
 | `BaseUrl` | 필수 | HTTP 또는 HTTPS 절대 URL |
-| `TimeoutSeconds` | 15 | UnityWebRequest timeout |
+| `TimeoutSeconds` | 15 | UnityWebRequest 제한 시간 |
 | `MaxConcurrentRequests` | 5 | 동시에 실행할 최대 요청 수 |
 | `MaxRetryAttempts` | 3 | 최초 요청을 제외한 연결 오류 재시도 횟수 |
 | `RetryDelaySeconds` | 2 | 재시도 대기 시간 |
 | `BundleDelaySeconds` | 5 | 병합 요청을 모으는 시간 |
 
-설정 객체는 생성 이후 변경할 수 없습니다. URL은 Base URL의 마지막 `/`와 API 경로의 첫 `/`를 정규화해 조합합니다.
+설정 객체는 생성 이후 변경할 수 없습니다. URL은 기본 URL의 마지막 `/`와 API 경로의 첫 `/`를 정규화해 조합합니다.
 
 ## 오류 및 재시도 정책
 
@@ -217,7 +217,7 @@ _httpManager.RegisterHandler(
 | 비어 있는 성공 응답 | 재시도 없이 `-1` 전달 |
 | HTTP 2xx | 성공 응답 파싱 |
 
-HTTP 프로토콜 오류는 연결 장애로 재시도하지 않습니다. 재시도 중에도 같은 `RequestInfo`와 요청 본문을 유지하며 패킷 번호만 새로 발급합니다.
+HTTP 오류 응답은 연결 장애로 간주하여 재시도하지 않습니다. 재시도 중에도 같은 `RequestInfo`와 요청 본문을 유지하며 패킷 번호만 새로 발급합니다.
 
 ## 병합 요청
 
@@ -253,45 +253,45 @@ public sealed class SaveProgressRequest :
 
 ## 수명 주기
 
-`Initialize()`를 다시 호출하면 기존 요청을 정리하고 새 설정으로 초기화합니다. `Dispose()` 또는 `OnDestroy()`에서는 다음 작업을 수행합니다.
+`Initialize()`를 다시 호출하면 기존 요청을 정리하고 새 설정으로 초기화합니다. `Dispose()` 또는 `OnDestroy()`가 호출되면 다음 작업을 수행합니다.
 
-- 활성 UnityWebRequest 중단
+- 실행 중인 UnityWebRequest 중단
 - 모든 요청 및 지연 코루틴 종료
 - 대기·진행·재시도 중인 RequestInfo 풀 반환
-- 병합 요청과 Handler 등록 정보 제거
+- 병합 요청과 핸들러 등록 정보 제거
 
-Manager가 비활성화된 동안에는 코루틴을 시작할 수 없으므로 요청을 보내기 전에 활성 상태인지 확인해야 합니다.
+매니저가 비활성화된 동안에는 코루틴을 시작할 수 없으므로 요청을 보내기 전에 활성 상태인지 확인해야 합니다.
 
 ## 샘플
 
-Package Manager에서 **Basic Request** 샘플을 Import할 수 있습니다.
+Package Manager에서 **Basic Request** 샘플을 가져올 수 있습니다.
 
 샘플에는 다음 내용이 포함됩니다.
 
 - `HttpManagerOptions` 생성과 초기화
-- Handler 어셈블리 등록
+- 핸들러 어셈블리 등록
 - 요청·응답 메시지
-- 매개변수 기반 Handler
+- 매개변수 기반 핸들러
 - 성공 콜백과 오류 처리
 
-샘플 Base URL은 placeholder이므로 실제 서버 주소와 API 스키마로 교체해야 합니다.
+샘플 기본 URL은 예시 값이므로 실제 서버 주소와 API 스키마로 교체해야 합니다.
 
 ## 현재 범위
 
-현재 Runtime은 다음 범위를 대상으로 합니다.
+현재 런타임은 다음 범위를 대상으로 합니다.
 
 - JSON POST
 - `JsonUtility` 직렬화
-- Handler 기반 응답 처리
+- 핸들러 기반 응답 처리
 - 연결 오류 재시도
 - 단순 동시 요청 제한과 요청 병합
 
 다음 기능은 사용하는 프로젝트에서 확장해야 합니다.
 
 - GET, PUT, PATCH, DELETE
-- 인증 Header와 공통 Header
+- 인증 헤더와 공통 헤더
 - 파일 업로드 및 다운로드
-- 다른 JSON 직렬화 라이브러리
+- 다른 JSON 직렬화 도구
 - 지수 백오프와 상태 코드별 재시도 정책
 - 요청별 취소와 진행률
 - 캐시 및 오프라인 큐
@@ -316,4 +316,4 @@ HttpBase/
 
 ## 라이선스
 
-이 프로젝트는 [MIT License](LICENSE)를 따릅니다.
+이 프로젝트는 [MIT 라이선스](LICENSE)를 따릅니다.
