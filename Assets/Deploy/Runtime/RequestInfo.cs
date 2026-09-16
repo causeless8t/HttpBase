@@ -15,6 +15,7 @@ namespace Causeless3t.Network
         }
 
         public eRequestState State { get; set; }
+        internal IRequestHandler Handler { get; private set; }
         public string Protocol { get; private set; }
         public int PacketNumber { get; private set; }
         public string Body { get; private set; }
@@ -22,8 +23,14 @@ namespace Causeless3t.Network
         
         public Action<RequestInfo, string> CustomCallback { get; private set; }
 
-        public void SetInfo(string protocol, int packetNum, string body, Action<RequestInfo, string> callback = null)
+        public void SetInfo(
+            IRequestHandler handler,
+            string protocol,
+            int packetNum,
+            string body,
+            Action<RequestInfo, string> callback = null)
         {
+            Handler = handler ?? throw new ArgumentNullException(nameof(handler));
             State = eRequestState.Ready;
             Protocol = protocol;
             PacketNumber = packetNum;
@@ -34,6 +41,7 @@ namespace Causeless3t.Network
 
         public void Reset()
         {
+            Handler = null;
             State = eRequestState.Ready;
             Protocol = null;
             PacketNumber = 0;

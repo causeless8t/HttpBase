@@ -92,7 +92,7 @@ namespace Causeless3t.Network
 
             Debug.Log($"<color=yellow>Req {API} >> {body}</color>");
 
-            info.SetInfo(API, packetNum, body, callback);
+            info.SetInfo(this, API, packetNum, body, callback);
             return info;
         }
 

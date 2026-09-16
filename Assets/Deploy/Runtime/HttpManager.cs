@@ -234,13 +234,13 @@ namespace Causeless3t.Network
                 return;
             }
 
-            var handler = GetHandler(info.Protocol);
+            var handler = info.Handler;
             if (handler == null && info.CustomCallback == null)
             {
-                _inProgressRequests.Remove(info);
                 Debug.LogError(
-                    $"{handler.GetType().Name}핸들러와 커스텀콜백이 존재하지 않아 " +
-                    $"{handler.API} 를 처리하는데 실패했습니다.");
+                    $`{info.Protocol} 요청을 처리할 Handler와 커스텀 콜백이 없습니다.`);
+
+                CompleteRequest(info);
                 return;
             }
 
@@ -252,16 +252,15 @@ namespace Causeless3t.Network
             }
             catch (Exception e)
             {
+                var handlerName = handler?.GetType().Name ?? "CustomCallback";
                 Debug.LogError(
-                    $"{handler.GetType().Name}핸들러에서 " +
-                    $"{handler.API} 를 처리하는데 실패했습니다.");
+                    $`{handlerName}에서 {info.Protocol} 응답을 처리하는데 실패했습니다.`);
 
-                Debug.LogError($"{e}");
+                Debug.LogError($`{e}`);
             }
             finally
             {
-                handler?.ReleasePacket(info);
-                _inProgressRequests.Remove(info);
+                CompleteRequest(info);
             }
         }
 
@@ -296,15 +295,32 @@ namespace Causeless3t.Network
         {
             _inProgressRequests.Remove(info);
 
-            await UniTask.WaitForSeconds(RetryTerm);
-
             if (!info.Retry(_packetNumber++))
             {
                 Debug.LogError(error);
+                CompleteRequest(info);
                 return;
             }
 
+            await UniTask.WaitForSeconds(RetryTerm);
             _requestWaitingQueue.Enqueue(info);
+        }
+
+        private void CompleteRequest(RequestInfo info)
+        {
+            if (info == null)
+                return;
+
+            _inProgressRequests.Remove(info);
+
+            var handler = info.Handler;
+            if (handler == null)
+            {
+                info.Reset();
+                return;
+            }
+
+            handler.ReleasePacket(info);
         }
 
         public void Dispose()
