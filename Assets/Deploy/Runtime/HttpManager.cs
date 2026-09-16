@@ -13,6 +13,7 @@ namespace Causeless3t.Network
 {
     public sealed class HttpManager : Singleton<HttpManager>, IDisposable
     {
+        private const int InvalidResponseError = -1;
         private static readonly int DefaultTimeout = 15;
         private static readonly string DefaultUrl = "https://google.com";
         private static readonly int MaxConcurrentPacketCount = 5;
@@ -197,54 +198,72 @@ namespace Causeless3t.Network
 
             await www.SendWebRequest();
 
-            if ((www.result != UnityWebRequest.Result.Success &&
-                 www.result != UnityWebRequest.Result.InProgress) ||
-                www.error != null)
+            if (www.result == UnityWebRequest.Result.ConnectionError)
             {
-                string errString = www.error;
+                var error = www.error;
 
                 if (Application.internetReachability == NetworkReachability.NotReachable)
                 {
-                    Debug.LogErrorFormat("network is not reachable !! {0}", errString);
+                    Debug.LogErrorFormat(
+                        "network is not reachable !! {0}",
+                        error);
                 }
                 else
                 {
                     Debug.LogErrorFormat(
-                        "recv error in {0}sec !! {1}",
+                        "connection error in {0}sec !! {1}",
                         Time.realtimeSinceStartup - elapsedTime,
-                        errString);
+                        error);
                 }
 
-                RetryProcess(errString, info).Forget();
+                RetryProcess(error, info).Forget();
                 return;
             }
 
-            while (!www.downloadHandler.isDone)
-                await UniTask.Yield();
-
-            string recv = www.downloadHandler.text;
-
-            if (string.IsNullOrEmpty(recv))
+            if (www.result == UnityWebRequest.Result.DataProcessingError)
             {
-                Debug.LogErrorFormat(
-                    "recv is empty in {0}sec !!",
-                    Time.realtimeSinceStartup - elapsedTime);
+                FailRequest(
+                    info,
+                    www.error ?? "Failed to process the response data.",
+                    InvalidResponseError);
 
-                RetryProcess("recv is empty!!", info).Forget();
                 return;
             }
 
+            if (www.result == UnityWebRequest.Result.InProgress)
+            {
+                FailRequest(
+                    info,
+                    "The request did not complete.",
+                    InvalidResponseError);
+
+                return;
+            }
+
+            var recv = www.downloadHandler.text;
             var handler = info.Handler;
+
             if (handler == null && info.CustomCallback == null)
             {
                 Debug.LogError(
-                    $"{info.Protocol} 요청을 처리할 Handler와 커스텀 콜백이 없습니다.");
+                    $`{info.Protocol} 요청을 처리할 Handler와 커스텀 콜백이 없습니다.`);
 
                 CompleteRequest(info);
                 return;
             }
 
             var httpStatusCode = (HttpStatusCode)www.responseCode;
+
+            if (www.result == UnityWebRequest.Result.Success &&
+                string.IsNullOrEmpty(recv))
+            {
+                FailRequest(
+                    info,
+                    $`{info.Protocol} returned an empty response.`,
+                    InvalidResponseError);
+
+                return;
+            }
 
             try
             {
@@ -254,9 +273,9 @@ namespace Causeless3t.Network
             {
                 var handlerName = handler?.GetType().Name ?? "CustomCallback";
                 Debug.LogError(
-                    $"{handlerName}에서 {info.Protocol} 응답을 처리하는데 실패했습니다.");
+                    $`{handlerName}에서 {info.Protocol} 응답을 처리하는데 실패했습니다.`);
 
-                Debug.LogError($"{e}");
+                Debug.LogError($`{e}`);
             }
             finally
             {
@@ -270,24 +289,62 @@ namespace Causeless3t.Network
             HttpStatusCode responseCode,
             string recvString)
         {
-            var baseRes = JsonUtility.FromJson<BaseResponse>(recvString);
+            BaseResponse baseResponse = null;
+
+            if (!string.IsNullOrEmpty(recvString))
+                baseResponse = JsonUtility.FromJson<BaseResponse>(recvString);
 
             if (handler == null)
             {
                 info.CustomCallback?.Invoke(info, recvString);
+                return;
             }
-            else
+
+            if (!IsSuccessStatusCode(responseCode))
             {
-                if (responseCode != HttpStatusCode.OK)
-                    handler.ErrorProcess(info, baseRes, (int)responseCode);
-                else if (baseRes.ErrCode != (int)HttpStatusCode.OK &&
-                         baseRes.ErrCode != 0)
-                    handler.ErrorProcess(info, baseRes, baseRes.ErrCode);
-                else
-                {
-                    info.CustomCallback?.Invoke(info, recvString);
-                    handler.Parse(info, recvString);
-                }
+                handler.ErrorProcess(info, baseResponse, (int)responseCode);
+                return;
+            }
+
+            if (baseResponse != null &&
+                baseResponse.ErrCode != (int)HttpStatusCode.OK &&
+                baseResponse.ErrCode != 0)
+            {
+                handler.ErrorProcess(info, baseResponse, baseResponse.ErrCode);
+                return;
+            }
+
+            info.CustomCallback?.Invoke(info, recvString);
+            handler.Parse(info, recvString);
+        }
+
+        private static bool IsSuccessStatusCode(HttpStatusCode responseCode)
+        {
+            var statusCode = (int)responseCode;
+            return statusCode >= 200 && statusCode <= 299;
+        }
+
+        private void FailRequest(
+            RequestInfo info,
+            string error,
+            int errorCode)
+        {
+            Debug.LogError(error);
+
+            try
+            {
+                info.Handler?.ErrorProcess(info, null, errorCode);
+            }
+            catch (Exception exception)
+            {
+                Debug.LogError(
+                    $`{info.Protocol} 오류 처리 중 예외가 발생했습니다.`);
+
+                Debug.LogError($`{exception}`);
+            }
+            finally
+            {
+                CompleteRequest(info);
             }
         }
 
