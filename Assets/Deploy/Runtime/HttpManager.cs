@@ -31,6 +31,7 @@ namespace Causeless3t.Network
                 Action<RequestInfo, string> Callback
             )> _collapsableRequestDic = new();
 
+        private CancellationTokenSource _lifetimeCTS;
         private CancellationTokenSource _delayedPacketCTS;
         private readonly HashSet<RequestInfo> _inProgressRequests = new();
 
@@ -39,7 +40,13 @@ namespace Causeless3t.Network
 
         public void Initialize()
         {
-            var types = Assembly.GetExecutingAssembly().GetTypes().Where(t => t.IsDefined(typeof(APIAttribute)));
+            Dispose();
+            _lifetimeCTS = new CancellationTokenSource();
+
+            var types = Assembly.GetExecutingAssembly()
+                .GetTypes()
+                .Where(t => t.IsDefined(typeof(APIAttribute)));
+
             RegisterRequestHandler(types);
             _packetNumber = 0;
         }
@@ -49,6 +56,8 @@ namespace Causeless3t.Network
             IRequest request,
             Action<RequestInfo, string> callback = null)
         {
+            ThrowIfNotInitialized();
+
             if (handler == null)
                 throw new ArgumentNullException(nameof(handler));
 
@@ -64,6 +73,8 @@ namespace Causeless3t.Network
             ICollapsableRequest request,
             Action<RequestInfo, string> callback = null)
         {
+            ThrowIfNotInitialized();
+
             if (handler == null)
                 throw new ArgumentNullException(nameof(handler));
 
@@ -104,36 +115,53 @@ namespace Causeless3t.Network
 
         private async UniTask DelayedSendBundlePacket()
         {
-            _delayedPacketCTS ??= new();
-            await UniTask.WaitForSeconds(
-                MaxBundlePacketDuration,
-                cancellationToken: _delayedPacketCTS.Token);
+            var lifetimeToken = _lifetimeCTS?.Token ?? CancellationToken.None;
+            var cancellationSource = _delayedPacketCTS ??=
+                CancellationTokenSource.CreateLinkedTokenSource(lifetimeToken);
 
-            Queue<(
-                IRequestHandler Handler,
-                ICollapsableRequest Request,
-                Action<RequestInfo, string> Callback
-            )> collapsedSendingQueue = new();
-
-            foreach (var tuple in _collapsableRequestDic.Values)
-                collapsedSendingQueue.Enqueue(tuple);
-
-            _collapsableRequestDic.Clear();
-
-            while (collapsedSendingQueue.Count > 0)
+            try
             {
-                var requestTuple = collapsedSendingQueue.Dequeue();
+                await UniTask.WaitForSeconds(
+                    MaxBundlePacketDuration,
+                    cancellationToken: cancellationSource.Token);
 
-                _requestWaitingQueue.Enqueue(
-                    requestTuple.Handler.CreateRequest(
-                        _packetNumber++,
-                        requestTuple.Request,
-                        requestTuple.Callback));
+                Queue<(
+                    IRequestHandler Handler,
+                    ICollapsableRequest Request,
+                    Action<RequestInfo, string> Callback
+                )> collapsedSendingQueue = new();
 
-                await UniTask.Yield();
+                foreach (var tuple in _collapsableRequestDic.Values)
+                    collapsedSendingQueue.Enqueue(tuple);
+
+                _collapsableRequestDic.Clear();
+
+                while (collapsedSendingQueue.Count > 0)
+                {
+                    cancellationSource.Token.ThrowIfCancellationRequested();
+
+                    var requestTuple = collapsedSendingQueue.Dequeue();
+
+                    _requestWaitingQueue.Enqueue(
+                        requestTuple.Handler.CreateRequest(
+                            _packetNumber++,
+                            requestTuple.Request,
+                            requestTuple.Callback));
+
+                    await UniTask.Yield();
+                }
             }
+            catch (OperationCanceledException)
+            {
+                // Dispose 또는 새로운 병합 그룹에 의해 취소되었습니다.
+            }
+            finally
+            {
+                if (ReferenceEquals(_delayedPacketCTS, cancellationSource))
+                    _delayedPacketCTS = null;
 
-            _delayedPacketCTS = null;
+                cancellationSource.Dispose();
+            }
         }
 
         private void RegisterRequestHandler(IEnumerable<Type> types)
@@ -169,6 +197,9 @@ namespace Causeless3t.Network
 
         public override void OnUpdate()
         {
+            if (_lifetimeCTS == null || _lifetimeCTS.IsCancellationRequested)
+                return;
+
             for (int i = 0; i < _requestWaitingQueue.Count; ++i)
             {
                 if (_inProgressRequests.Count >= MaxConcurrentPacketCount)
@@ -196,7 +227,18 @@ namespace Causeless3t.Network
 
             float elapsedTime = Time.realtimeSinceStartup;
 
-            await www.SendWebRequest();
+            var cancellationToken =
+                _lifetimeCTS?.Token ?? CancellationToken.None;
+
+            try
+            {
+                await www.SendWebRequest().WithCancellation(cancellationToken);
+            }
+            catch (OperationCanceledException)
+            {
+                CompleteRequest(info);
+                return;
+            }
 
             if (www.result == UnityWebRequest.Result.ConnectionError)
             {
@@ -359,8 +401,22 @@ namespace Causeless3t.Network
                 return;
             }
 
-            await UniTask.WaitForSeconds(RetryTerm);
-            _requestWaitingQueue.Enqueue(info);
+            var cancellationToken =
+                _lifetimeCTS?.Token ?? CancellationToken.None;
+
+            try
+            {
+                await UniTask.WaitForSeconds(
+                    RetryTerm,
+                    cancellationToken: cancellationToken);
+
+                cancellationToken.ThrowIfCancellationRequested();
+                _requestWaitingQueue.Enqueue(info);
+            }
+            catch (OperationCanceledException)
+            {
+                CompleteRequest(info);
+            }
         }
 
         private void CompleteRequest(RequestInfo info)
@@ -380,15 +436,33 @@ namespace Causeless3t.Network
             handler.ReleasePacket(info);
         }
 
+        private void ThrowIfNotInitialized()
+        {
+            if (_lifetimeCTS == null || _lifetimeCTS.IsCancellationRequested)
+            {
+                throw new InvalidOperationException(
+                    "HttpManager.Initialize() must be called before enqueueing requests.");
+            }
+        }
+
         public void Dispose()
         {
-            _delayedPacketCTS?.Cancel();
-            _delayedPacketCTS = null;
+            var lifetimeCTS = _lifetimeCTS;
+            _lifetimeCTS = null;
+            lifetimeCTS?.Cancel();
 
+            var delayedPacketCTS = _delayedPacketCTS;
+            _delayedPacketCTS = null;
+            delayedPacketCTS?.Cancel();
+
+            while (_requestWaitingQueue.TryDequeue(out var requestInfo))
+                CompleteRequest(requestInfo);
+
+            _collapsableRequestDic.Clear();
             _requestHandlers.Clear();
-            _requestWaitingQueue.Clear();
-            _inProgressRequests.Clear();
             _packetNumber = 0;
+
+            lifetimeCTS?.Dispose();
         }
     }
 }
