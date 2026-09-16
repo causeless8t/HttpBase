@@ -31,7 +31,7 @@ namespace Causeless3t.Network
             )> _collapsableRequestDic = new();
 
         private CancellationTokenSource _delayedPacketCTS;
-        private readonly Queue<RequestInfo> _inProgressQueue = new();
+        private readonly HashSet<RequestInfo> _inProgressRequests = new();
 
         private int _packetNumber;
         public int PacketNumber => _packetNumber;
@@ -170,7 +170,7 @@ namespace Causeless3t.Network
         {
             for (int i = 0; i < _requestWaitingQueue.Count; ++i)
             {
-                if (_inProgressQueue.Count >= MaxConcurrentPacketCount)
+                if (_inProgressRequests.Count >= MaxConcurrentPacketCount)
                     break;
 
                 var request = _requestWaitingQueue.Dequeue();
@@ -191,7 +191,7 @@ namespace Causeless3t.Network
             www.timeout = DefaultTimeout;
 
             info.State = RequestInfo.eRequestState.InProgress;
-            _inProgressQueue.Enqueue(info);
+            _inProgressRequests.Add(info);
 
             float elapsedTime = Time.realtimeSinceStartup;
 
@@ -237,7 +237,7 @@ namespace Causeless3t.Network
             var handler = GetHandler(info.Protocol);
             if (handler == null && info.CustomCallback == null)
             {
-                _inProgressQueue.Dequeue();
+                _inProgressRequests.Remove(info);
                 Debug.LogError(
                     $"{handler.GetType().Name}핸들러와 커스텀콜백이 존재하지 않아 " +
                     $"{handler.API} 를 처리하는데 실패했습니다.");
@@ -261,7 +261,7 @@ namespace Causeless3t.Network
             finally
             {
                 handler?.ReleasePacket(info);
-                _inProgressQueue.Dequeue();
+                _inProgressRequests.Remove(info);
             }
         }
 
@@ -294,7 +294,7 @@ namespace Causeless3t.Network
 
         private async UniTask RetryProcess(string error, RequestInfo info)
         {
-            _inProgressQueue.Dequeue();
+            _inProgressRequests.Remove(info);
 
             await UniTask.WaitForSeconds(RetryTerm);
 
@@ -314,7 +314,7 @@ namespace Causeless3t.Network
 
             _requestHandlers.Clear();
             _requestWaitingQueue.Clear();
-            _inProgressQueue.Clear();
+            _inProgressRequests.Clear();
             _packetNumber = 0;
         }
     }
