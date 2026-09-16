@@ -15,20 +15,54 @@ namespace Causeless3t.Network
     {
         private const int InvalidResponseError = -1;
 
+        private sealed class PendingCollapsibleRequest : IDisposable
+        {
+            public IRequestHandler Handler { get; }
+            public ICollapsableRequest Request { get; }
+            public Action<RequestInfo, string> Callback { get; private set; }
+            public CancellationTokenSource CancellationSource { get; }
+
+            public PendingCollapsibleRequest(
+                IRequestHandler handler,
+                ICollapsableRequest request,
+                Action<RequestInfo, string> callback,
+                CancellationToken lifetimeToken)
+            {
+                Handler = handler;
+                Request = request;
+                Callback = callback;
+                CancellationSource =
+                    CancellationTokenSource.CreateLinkedTokenSource(
+                        lifetimeToken);
+            }
+
+            public void Collapse(
+                ICollapsableRequest request,
+                Action<RequestInfo, string> callback)
+            {
+                Request.Collapse(request);
+                Callback += callback;
+            }
+
+            public void Cancel()
+            {
+                CancellationSource.Cancel();
+            }
+
+            public void Dispose()
+            {
+                CancellationSource.Dispose();
+            }
+        }
+
         private readonly Dictionary<string, IRequestHandler> _requestHandlers = new();
         private readonly Queue<RequestInfo> _requestWaitingQueue = new();
 
-        private readonly Dictionary<
-            string,
-            (
-                IRequestHandler Handler,
-                ICollapsableRequest Request,
-                Action<RequestInfo, string> Callback
-            )> _collapsableRequestDic = new();
+        private readonly Dictionary<string, PendingCollapsibleRequest>
+            _pendingCollapsibleRequests = new();
 
         private HttpManagerOptions _options;
         private CancellationTokenSource _lifetimeCTS;
-        private CancellationTokenSource _delayedPacketCTS;
         private readonly HashSet<RequestInfo> _inProgressRequests = new();
 
         private int _packetNumber;
@@ -99,87 +133,95 @@ namespace Causeless3t.Network
             if (request == null)
                 throw new ArgumentNullException(nameof(request));
 
-            if (!_collapsableRequestDic.TryGetValue(handler.API, out var requestTuple))
-            {
-                _collapsableRequestDic.Add(
+            if (_pendingCollapsibleRequests.TryGetValue(
                     handler.API,
-                    (handler, request, callback));
-
-                DelayedSendBundlePacket().Forget();
-            }
-            else if (!requestTuple.Request.Equals(request))
+                    out var pendingRequest))
             {
-                _delayedPacketCTS?.Cancel();
-                _delayedPacketCTS = null;
+                if (pendingRequest.Request.Equals(request))
+                {
+                    pendingRequest.Collapse(request, callback);
+                    return;
+                }
 
-                _requestWaitingQueue.Enqueue(
-                    requestTuple.Handler.CreateRequest(
-                        _packetNumber++,
-                        requestTuple.Request,
-                        requestTuple.Callback));
-
-                _collapsableRequestDic[handler.API] =
-                    (handler, request, callback);
-
-                DelayedSendBundlePacket().Forget();
+                FlushPendingBundle(handler.API, pendingRequest);
             }
-            else
-            {
-                requestTuple.Request.Collapse(request);
-                requestTuple.Callback += callback;
-                _collapsableRequestDic[handler.API] = requestTuple;
-            }
+
+            var lifetimeToken =
+                _lifetimeCTS?.Token ?? CancellationToken.None;
+
+            var newPendingRequest = new PendingCollapsibleRequest(
+                handler,
+                request,
+                callback,
+                lifetimeToken);
+
+            _pendingCollapsibleRequests.Add(
+                handler.API,
+                newPendingRequest);
+
+            DelayedSendBundlePacket(
+                    handler.API,
+                    newPendingRequest)
+                .Forget();
         }
 
-        private async UniTask DelayedSendBundlePacket()
+        private async UniTask DelayedSendBundlePacket(
+            string api,
+            PendingCollapsibleRequest pendingRequest)
         {
-            var lifetimeToken = _lifetimeCTS?.Token ?? CancellationToken.None;
-            var cancellationSource = _delayedPacketCTS ??=
-                CancellationTokenSource.CreateLinkedTokenSource(lifetimeToken);
-
             try
             {
                 await UniTask.WaitForSeconds(
                     _options.BundleDelaySeconds,
-                    cancellationToken: cancellationSource.Token);
+                    cancellationToken:
+                        pendingRequest.CancellationSource.Token);
 
-                Queue<(
-                    IRequestHandler Handler,
-                    ICollapsableRequest Request,
-                    Action<RequestInfo, string> Callback
-                )> collapsedSendingQueue = new();
-
-                foreach (var tuple in _collapsableRequestDic.Values)
-                    collapsedSendingQueue.Enqueue(tuple);
-
-                _collapsableRequestDic.Clear();
-
-                while (collapsedSendingQueue.Count > 0)
+                if (!_pendingCollapsibleRequests.TryGetValue(
+                        api,
+                        out var currentRequest) ||
+                    !ReferenceEquals(currentRequest, pendingRequest))
                 {
-                    cancellationSource.Token.ThrowIfCancellationRequested();
-
-                    var requestTuple = collapsedSendingQueue.Dequeue();
-
-                    _requestWaitingQueue.Enqueue(
-                        requestTuple.Handler.CreateRequest(
-                            _packetNumber++,
-                            requestTuple.Request,
-                            requestTuple.Callback));
-
-                    await UniTask.Yield();
+                    return;
                 }
+
+                _pendingCollapsibleRequests.Remove(api);
+                QueueBundleRequest(pendingRequest);
             }
             catch (OperationCanceledException)
             {
-                // Dispose 또는 새로운 병합 그룹에 의해 취소되었습니다.
+                // Dispose 또는 동일 API의 새로운 병합 그룹에 의해 취소되었습니다.
             }
             finally
             {
-                if (ReferenceEquals(_delayedPacketCTS, cancellationSource))
-                    _delayedPacketCTS = null;
-
-                cancellationSource.Dispose();
+                pendingRequest.Dispose();
             }
+        }
+
+        private void FlushPendingBundle(
+            string api,
+            PendingCollapsibleRequest pendingRequest)
+        {
+            if (!_pendingCollapsibleRequests.TryGetValue(
+                    api,
+                    out var currentRequest) ||
+                !ReferenceEquals(currentRequest, pendingRequest))
+            {
+                return;
+            }
+
+            _pendingCollapsibleRequests.Remove(api);
+            pendingRequest.Cancel();
+            QueueBundleRequest(pendingRequest);
+        }
+
+        private void QueueBundleRequest(
+            PendingCollapsibleRequest pendingRequest)
+        {
+            _requestWaitingQueue.Enqueue(
+                pendingRequest.Handler.CreateRequest(
+                    _packetNumber++,
+                    pendingRequest.Request,
+                    pendingRequest.Callback));
         }
 
         public int RegisterHandlersFrom(Assembly assembly)
@@ -529,16 +571,20 @@ namespace Causeless3t.Network
         {
             var lifetimeCTS = _lifetimeCTS;
             _lifetimeCTS = null;
-            lifetimeCTS?.Cancel();
 
-            var delayedPacketCTS = _delayedPacketCTS;
-            _delayedPacketCTS = null;
-            delayedPacketCTS?.Cancel();
+            var pendingRequests =
+                _pendingCollapsibleRequests.Values.ToArray();
+
+            _pendingCollapsibleRequests.Clear();
+
+            foreach (var pendingRequest in pendingRequests)
+                pendingRequest.Cancel();
+
+            lifetimeCTS?.Cancel();
 
             while (_requestWaitingQueue.TryDequeue(out var requestInfo))
                 CompleteRequest(requestInfo);
 
-            _collapsableRequestDic.Clear();
             _requestHandlers.Clear();
             _options = null;
             _packetNumber = 0;
