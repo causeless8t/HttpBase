@@ -13,30 +13,31 @@ namespace Causeless3t.Network
         public APIAttribute(string api) => API = api;
         public static string GetAPI(Type type) => type.GetCustomAttribute<APIAttribute>()?.API;
     }
-    
+
     public interface IRequest
     {
     }
 
-    public interface ICollapsableRequest : IEquatable<ICollapsableRequest>
+    public interface ICollapsableRequest : IRequest, IEquatable<ICollapsableRequest>
     {
         void Collapse(ICollapsableRequest req);
     }
-    
+
     [Serializable]
     public class BaseResponse
     {
-        public int ErrCode; 
+        public int ErrCode;
     }
-    
+
     public interface IRequestHandler
     {
         string API { get; }
 
-        RequestInfo CreateRequest(int packetNum);
+        RequestInfo CreateRequest(
+            int packetNum,
+            IRequest request,
+            Action<RequestInfo, string> callback = null);
 
-        RequestInfo CreateRequest(int packetNum, ICollapsableRequest request);
-        
         void Parse(RequestInfo requestInfo, string responseString);
 
         void ErrorProcess(RequestInfo requestInfo, BaseResponse response, int error);
@@ -44,52 +45,60 @@ namespace Causeless3t.Network
         void ReleasePacket(RequestInfo info);
     }
 
-    public abstract class RequestHandler<REQ, RES> : IRequestHandler where REQ : IRequest where RES : BaseResponse
+    public abstract class RequestHandler<REQ, RES> : IRequestHandler
+        where REQ : IRequest
+        where RES : BaseResponse
     {
         public string API => APIAttribute.GetAPI(GetType());
 
-        protected REQ Message { get; set; }
-
-        protected Action<RequestInfo, string> CallbackAction;
-        
-        private static readonly IObjectPool<RequestInfo> RequestInfoPool = new ObjectPool<RequestInfo>(() => new RequestInfo());
+        private static readonly IObjectPool<RequestInfo> RequestInfoPool =
+            new ObjectPool<RequestInfo>(() => new RequestInfo());
 
         public void EnqueueRequest(Action<RequestInfo, string> callback = null)
         {
-            CallbackAction = callback;
-            
-            if (typeof(ICollapsableRequest).IsAssignableFrom(typeof(REQ)))
-                HttpManager.Instance.EnqueueBundlePacket(this, MakeReqMessage() as ICollapsableRequest);
-            else
-            {
-                Message = MakeReqMessage();
-                HttpManager.Instance.EnqueuePacket(this);
-            }
+            Enqueue(MakeReqMessage(), callback);
         }
-        
+
         protected abstract REQ MakeReqMessage();
 
-        public RequestInfo CreateRequest(int packetNum)
+        protected void Enqueue(REQ request, Action<RequestInfo, string> callback)
         {
-            var info = RequestInfoPool.Get();
-            var req = JsonUtility.ToJson(Message);
-            Debug.Log($"<color=yellow>Req {API} >> {req}</color>");
-            info.SetInfo(API, packetNum, req, CallbackAction);
-            return info;
+            if (request == null)
+                throw new InvalidOperationException($"{GetType().Name} returned a null request.");
+
+            if (request is ICollapsableRequest collapsableRequest)
+            {
+                HttpManager.Instance.EnqueueBundlePacket(this, collapsableRequest, callback);
+                return;
+            }
+
+            HttpManager.Instance.EnqueuePacket(this, request, callback);
         }
 
-        public RequestInfo CreateRequest(int packetNum, ICollapsableRequest request)
+        public RequestInfo CreateRequest(
+            int packetNum,
+            IRequest request,
+            Action<RequestInfo, string> callback = null)
         {
+            if (request is not REQ typedRequest)
+            {
+                throw new ArgumentException(
+                    $"Request must be of type {typeof(REQ).Name}.",
+                    nameof(request));
+            }
+
             var info = RequestInfoPool.Get();
-            var req = JsonUtility.ToJson(request);
-            Debug.Log($"<color=yellow>Req {API} >> {req}</color>");
-            info.SetInfo(API, packetNum, req, CallbackAction);
+            var body = JsonUtility.ToJson(typedRequest);
+
+            Debug.Log($"<color=yellow>Req {API} >> {body}</color>");
+
+            info.SetInfo(API, packetNum, body, callback);
             return info;
         }
 
         public void Parse(RequestInfo requestInfo, string responseString)
         {
-            var response = JsonUtility.FromJson<RES>(responseString); 
+            var response = JsonUtility.FromJson<RES>(responseString);
             Process(requestInfo, response);
         }
 
@@ -106,23 +115,19 @@ namespace Causeless3t.Network
             RequestInfoPool.Release(info);
         }
     }
-    
-    public abstract class RequestHandler<REQ, RES, PARAM> : RequestHandler<REQ, RES> where REQ : IRequest where RES : BaseResponse
+
+    public abstract class RequestHandler<REQ, RES, PARAM> : RequestHandler<REQ, RES>
+        where REQ : IRequest
+        where RES : BaseResponse
     {
         protected override REQ MakeReqMessage() => default;
         protected abstract REQ MakeReqMessage(PARAM @params);
-        
-        public void EnqueueRequest(PARAM param, Action<RequestInfo, string> callback = null)
-        {
-            if (typeof(ICollapsableRequest).IsAssignableFrom(typeof(REQ)))
-                HttpManager.Instance.EnqueueBundlePacket(this, MakeReqMessage(param) as ICollapsableRequest);
-            else
-            {
-                Message = MakeReqMessage(param);
-                HttpManager.Instance.EnqueuePacket(this);
-            }
 
-            CallbackAction = callback;
+        public void EnqueueRequest(
+            PARAM param,
+            Action<RequestInfo, string> callback = null)
+        {
+            Enqueue(MakeReqMessage(param), callback);
         }
     }
 }
