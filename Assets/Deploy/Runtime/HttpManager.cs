@@ -4,14 +4,13 @@ using System.Linq;
 using System.Net;
 using System.Reflection;
 using System.Threading;
-using Causeless3t.Core;
 using Cysharp.Threading.Tasks;
 using UnityEngine;
 using UnityEngine.Networking;
 
 namespace Causeless3t.Network
 {
-    public sealed class HttpManager : Singleton<HttpManager>, IDisposable
+    public sealed class HttpManager : MonoBehaviour, IDisposable
     {
         private const int InvalidResponseError = -1;
 
@@ -280,14 +279,19 @@ namespace Causeless3t.Network
                     $"{handler.GetType().FullName} does not define a valid API path.");
             }
 
-            if (!_requestHandlers.TryAdd(handler.API, handler))
+            if (_requestHandlers.TryGetValue(
+                    handler.API,
+                    out var registeredHandler))
             {
-                var registeredType = _requestHandlers[handler.API].GetType();
-
                 throw new InvalidOperationException(
                     $"The API path '{handler.API}' is already registered by " +
-                    $"{registeredType.FullName}.");
+                    $"{registeredHandler.GetType().FullName}.");
             }
+
+            if (handler is IHttpManagerAware managerAware)
+                managerAware.Bind(this);
+
+            _requestHandlers.Add(handler.API, handler);
 
             Debug.Log(
                 $"Registered HTTP Handler: {handler.API} -> " +
@@ -307,11 +311,10 @@ namespace Causeless3t.Network
 
         public T GetHandler<T>() where T : class, IRequestHandler
         {
-            var api = APIAttribute.GetAPI(typeof(T));
-            return GetHandler(api) as T;
+            return _requestHandlers.Values.OfType<T>().FirstOrDefault();
         }
 
-        public override void OnUpdate()
+        private void Update()
         {
             if (_lifetimeCTS == null || _lifetimeCTS.IsCancellationRequested)
                 return;
@@ -590,6 +593,11 @@ namespace Causeless3t.Network
             _packetNumber = 0;
 
             lifetimeCTS?.Dispose();
+        }
+
+        private void OnDestroy()
+        {
+            Dispose();
         }
     }
 }

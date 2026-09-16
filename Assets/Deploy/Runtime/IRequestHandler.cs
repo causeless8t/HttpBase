@@ -30,6 +30,11 @@ namespace Causeless3t.Network
         public int ErrCode;
     }
 
+    public interface IHttpManagerAware
+    {
+        void Bind(HttpManager manager);
+    }
+
     public interface IRequestHandler
     {
         string API { get; }
@@ -46,14 +51,33 @@ namespace Causeless3t.Network
         void ReleasePacket(RequestInfo info);
     }
 
-    public abstract class RequestHandler<REQ, RES> : IRequestHandler
+    public abstract class RequestHandler<REQ, RES> :
+        IRequestHandler,
+        IHttpManagerAware
         where REQ : IRequest
         where RES : BaseResponse
     {
         public virtual string API => APIAttribute.GetAPI(GetType());
 
+        private HttpManager _httpManager;
+
         private static readonly IObjectPool<RequestInfo> RequestInfoPool =
             new ObjectPool<RequestInfo>(() => new RequestInfo());
+
+        void IHttpManagerAware.Bind(HttpManager manager)
+        {
+            if (manager == null)
+                throw new ArgumentNullException(nameof(manager));
+
+            if (_httpManager != null &&
+                !ReferenceEquals(_httpManager, manager))
+            {
+                throw new InvalidOperationException(
+                    $"{GetType().Name} is already bound to another HttpManager.");
+            }
+
+            _httpManager = manager;
+        }
 
         public void EnqueueRequest(Action<RequestInfo, string> callback = null)
         {
@@ -69,11 +93,22 @@ namespace Causeless3t.Network
 
             if (request is ICollapsableRequest collapsableRequest)
             {
-                HttpManager.Instance.EnqueueBundlePacket(this, collapsableRequest, callback);
+                GetManager().EnqueueBundlePacket(this, collapsableRequest, callback);
                 return;
             }
 
-            HttpManager.Instance.EnqueuePacket(this, request, callback);
+            GetManager().EnqueuePacket(this, request, callback);
+        }
+
+        private HttpManager GetManager()
+        {
+            if (_httpManager == null)
+            {
+                throw new InvalidOperationException(
+                    $"{GetType().Name} is not registered to an HttpManager.");
+            }
+
+            return _httpManager;
         }
 
         public RequestInfo CreateRequest(
