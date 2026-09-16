@@ -238,7 +238,7 @@ namespace Causeless3t.Network
             if (handler == null && info.CustomCallback == null)
             {
                 Debug.LogError(
-                    $`{info.Protocol} 요청을 처리할 Handler와 커스텀 콜백이 없습니다.`);
+                    $"{info.Protocol} 요청을 처리할 Handler와 커스텀 콜백이 없습니다.");
 
                 CompleteRequest(info);
                 return;
@@ -254,9 +254,9 @@ namespace Causeless3t.Network
             {
                 var handlerName = handler?.GetType().Name ?? "CustomCallback";
                 Debug.LogError(
-                    $`{handlerName}에서 {info.Protocol} 응답을 처리하는데 실패했습니다.`);
+                    $"{handlerName}에서 {info.Protocol} 응답을 처리하는데 실패했습니다.");
 
-                Debug.LogError($`{e}`);
+                Debug.LogError($"{e}");
             }
             finally
             {
