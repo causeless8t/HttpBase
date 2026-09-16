@@ -6,9 +6,16 @@ namespace Causeless3t.Network
 {
     public class HttpRequest : Singleton<HttpRequest>
     {
+        [SerializeField]
+        private string _baseUrl = "https://api.example.com";
+
         public void Initialize()
         {
-            HttpManager.Instance.Initialize(typeof(SampleHandler).Assembly);
+            var options = new HttpManagerOptions(_baseUrl);
+
+            HttpManager.Instance.Initialize(
+                options,
+                typeof(SampleHandler).Assembly);
         }
 
         public void TestAPI(int param)

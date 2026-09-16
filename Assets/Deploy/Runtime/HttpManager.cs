@@ -14,11 +14,6 @@ namespace Causeless3t.Network
     public sealed class HttpManager : Singleton<HttpManager>, IDisposable
     {
         private const int InvalidResponseError = -1;
-        private static readonly int DefaultTimeout = 15;
-        private static readonly string DefaultUrl = "https://google.com";
-        private static readonly int MaxConcurrentPacketCount = 5;
-        private static readonly float MaxBundlePacketDuration = 5f;
-        private static readonly float RetryTerm = 2f;
 
         private readonly Dictionary<string, IRequestHandler> _requestHandlers = new();
         private readonly Queue<RequestInfo> _requestWaitingQueue = new();
@@ -31,6 +26,7 @@ namespace Causeless3t.Network
                 Action<RequestInfo, string> Callback
             )> _collapsableRequestDic = new();
 
+        private HttpManagerOptions _options;
         private CancellationTokenSource _lifetimeCTS;
         private CancellationTokenSource _delayedPacketCTS;
         private readonly HashSet<RequestInfo> _inProgressRequests = new();
@@ -38,14 +34,15 @@ namespace Causeless3t.Network
         private int _packetNumber;
         public int PacketNumber => _packetNumber;
 
-        public void Initialize(params Assembly[] handlerAssemblies)
+        public void Initialize(
+            HttpManagerOptions options,
+            params Assembly[] handlerAssemblies)
         {
-            if (handlerAssemblies == null || handlerAssemblies.Length == 0)
-            {
-                throw new ArgumentException(
-                    "At least one Handler assembly is required.",
-                    nameof(handlerAssemblies));
-            }
+            if (options == null)
+                throw new ArgumentNullException(nameof(options));
+
+            if (handlerAssemblies == null)
+                throw new ArgumentNullException(nameof(handlerAssemblies));
 
             if (handlerAssemblies.Any(assembly => assembly == null))
             {
@@ -55,6 +52,7 @@ namespace Causeless3t.Network
             }
 
             Dispose();
+            _options = options;
             _lifetimeCTS = new CancellationTokenSource();
 
             try
@@ -142,7 +140,7 @@ namespace Causeless3t.Network
             try
             {
                 await UniTask.WaitForSeconds(
-                    MaxBundlePacketDuration,
+                    _options.BundleDelaySeconds,
                     cancellationToken: cancellationSource.Token);
 
                 Queue<(
@@ -278,7 +276,7 @@ namespace Causeless3t.Network
 
             for (int i = 0; i < _requestWaitingQueue.Count; ++i)
             {
-                if (_inProgressRequests.Count >= MaxConcurrentPacketCount)
+                if (_inProgressRequests.Count >= _options.MaxConcurrentRequests)
                     break;
 
                 var request = _requestWaitingQueue.Dequeue();
@@ -290,13 +288,13 @@ namespace Causeless3t.Network
         {
             WWWForm formData = new WWWForm();
             byte[] bytes = new System.Text.UTF8Encoding().GetBytes(info.Body);
-            using var www = UnityWebRequest.Post($"{DefaultUrl}{info.Protocol}", formData);
+            using var www = UnityWebRequest.Post(_options.BuildUrl(info.Protocol), formData);
             www.uploadHandler = new UploadHandlerRaw(bytes);
             www.downloadHandler = new DownloadHandlerBuffer();
             // www.SetRequestHeader("Content-Type", "application/json");
             // www.SetRequestHeader("Authorization", $"Bearer {SessionKey}");
             www.useHttpContinue = false;
-            www.timeout = DefaultTimeout;
+            www.timeout = _options.TimeoutSeconds;
 
             info.State = RequestInfo.eRequestState.InProgress;
             _inProgressRequests.Add(info);
@@ -470,12 +468,16 @@ namespace Causeless3t.Network
         {
             _inProgressRequests.Remove(info);
 
-            if (!info.Retry(_packetNumber++))
+            if (!info.TryPrepareRetry(
+                    _packetNumber,
+                    _options.MaxRetryAttempts))
             {
                 Debug.LogError(error);
                 CompleteRequest(info);
                 return;
             }
+
+            _packetNumber++;
 
             var cancellationToken =
                 _lifetimeCTS?.Token ?? CancellationToken.None;
@@ -483,7 +485,7 @@ namespace Causeless3t.Network
             try
             {
                 await UniTask.WaitForSeconds(
-                    RetryTerm,
+                    _options.RetryDelaySeconds,
                     cancellationToken: cancellationToken);
 
                 cancellationToken.ThrowIfCancellationRequested();
@@ -514,7 +516,9 @@ namespace Causeless3t.Network
 
         private void ThrowIfNotInitialized()
         {
-            if (_lifetimeCTS == null || _lifetimeCTS.IsCancellationRequested)
+            if (_options == null ||
+                _lifetimeCTS == null ||
+                _lifetimeCTS.IsCancellationRequested)
             {
                 throw new InvalidOperationException(
                     "HttpManager.Initialize() must be called before enqueueing requests.");
@@ -536,6 +540,7 @@ namespace Causeless3t.Network
 
             _collapsableRequestDic.Clear();
             _requestHandlers.Clear();
+            _options = null;
             _packetNumber = 0;
 
             lifetimeCTS?.Dispose();

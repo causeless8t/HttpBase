@@ -5,8 +5,6 @@ namespace Causeless3t.Network
 {
     public sealed class RequestInfo
     {
-        private static readonly int MaxRetryCount = 3;
-        
         public enum eRequestState
         {
             Ready = 0,
@@ -50,11 +48,23 @@ namespace Causeless3t.Network
             CustomCallback = null;
         }
 
-        public bool Retry(int packetNum)
+        public bool TryPrepareRetry(
+            int packetNum,
+            int maxRetryAttempts)
         {
+            if (maxRetryAttempts < 0)
+            {
+                throw new ArgumentOutOfRangeException(
+                    nameof(maxRetryAttempts));
+            }
+
+            if (RetryCount >= maxRetryAttempts)
+                return false;
+
+            RetryCount++;
             PacketNumber = packetNum;
             State = eRequestState.Retrying;
-            return ++RetryCount < MaxRetryCount;
+            return true;
         }
     }
 }
