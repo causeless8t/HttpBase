@@ -2,11 +2,12 @@ using System;
 using System.Reflection;
 using UnityEngine;
 using UnityEngine.Pool;
+using UnityEngine.Scripting;
 
 namespace Causeless3t.Network
 {
     [AttributeUsage(AttributeTargets.Class)]
-    public class APIAttribute : Attribute
+    public class APIAttribute : PreserveAttribute
     {
         public string API { get; }
 
@@ -49,7 +50,7 @@ namespace Causeless3t.Network
         where REQ : IRequest
         where RES : BaseResponse
     {
-        public string API => APIAttribute.GetAPI(GetType());
+        public virtual string API => APIAttribute.GetAPI(GetType());
 
         private static readonly IObjectPool<RequestInfo> RequestInfoPool =
             new ObjectPool<RequestInfo>(() => new RequestInfo());
