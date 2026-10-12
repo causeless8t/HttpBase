@@ -1,8 +1,8 @@
 {
   "name": "com.causeless3t.httpbase",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "displayName": "HttpBase",
-  "description": "A lightweight HTTP request foundation for Unity with handler-based JSON processing, bounded concurrency, retries, request collapsing, and explicit lifecycle management.",
+  "description": "A lightweight HTTP request foundation for Unity with handler-based JSON processing, GET/POST/PUT/DELETE/PATCH, common and send-time headers, bounded concurrency, retries, request collapsing, and explicit lifecycle management.",
   "unity": "2022.3",
   "author": {
     "name": "causeless3t",

@@ -1,9 +1,13 @@
 using System;
+using System.Collections.Generic;
 
 namespace Causeless3t.Network
 {
     public sealed class HttpManagerOptions
     {
+        private static readonly IReadOnlyDictionary<string, string> NoHeaders =
+            new Dictionary<string, string>();
+
         public string BaseUrl { get; }
         public int TimeoutSeconds { get; }
         public int MaxConcurrentRequests { get; }
@@ -11,13 +15,27 @@ namespace Causeless3t.Network
         public float RetryDelaySeconds { get; }
         public float BundleDelaySeconds { get; }
 
+        /// <summary>
+        /// Headers applied to every request before per-request headers and
+        /// <see cref="IRequestPolicy.ApplyHeaders"/>. Copied when the options are created.
+        /// </summary>
+        public IReadOnlyDictionary<string, string> DefaultHeaders { get; }
+
+        /// <summary>
+        /// Whether request bodies may be logged at all. Handlers can also opt out with
+        /// <see cref="IRequestPolicy.LogRequestBody"/>. Headers are never logged.
+        /// </summary>
+        public bool LogRequestBodies { get; }
+
         public HttpManagerOptions(
             string baseUrl,
             int timeoutSeconds = 15,
             int maxConcurrentRequests = 5,
             int maxRetryAttempts = 3,
             float retryDelaySeconds = 2f,
-            float bundleDelaySeconds = 5f)
+            float bundleDelaySeconds = 5f,
+            IReadOnlyDictionary<string, string> defaultHeaders = null,
+            bool logRequestBodies = true)
         {
             if (string.IsNullOrWhiteSpace(baseUrl))
                 throw new ArgumentException(
@@ -64,7 +82,13 @@ namespace Causeless3t.Network
             MaxRetryAttempts = maxRetryAttempts;
             RetryDelaySeconds = retryDelaySeconds;
             BundleDelaySeconds = bundleDelaySeconds;
+            DefaultHeaders = CopyHeaders(defaultHeaders);
+            LogRequestBodies = logRequestBodies;
         }
+
+        /// <summary>True when the base URL uses HTTPS.</summary>
+        public bool IsHttps =>
+            BaseUrl.StartsWith("https://", StringComparison.OrdinalIgnoreCase);
 
         public string BuildUrl(string api)
         {
@@ -74,6 +98,22 @@ namespace Causeless3t.Network
                     nameof(api));
 
             return $"{BaseUrl}/{api.TrimStart('/')}";
+        }
+
+        private static IReadOnlyDictionary<string, string> CopyHeaders(
+            IReadOnlyDictionary<string, string> headers)
+        {
+            if (headers == null || headers.Count == 0)
+                return NoHeaders;
+
+            var copy = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var header in headers)
+            {
+                RequestInfo.ValidateHeader(header.Key, header.Value);
+                copy[header.Key] = header.Value;
+            }
+
+            return copy;
         }
     }
 }

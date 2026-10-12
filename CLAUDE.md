@@ -11,7 +11,9 @@ Runtime의 책임:
 - HttpManager 설정과 수명 주기
 - 요청 대기열과 동시 실행 제한
 - UnityWebRequest 생성과 종료
-- 연결 오류 재시도
+- HTTP Method(GET·POST·PUT·DELETE·PATCH)와 JSON 본문
+- 공통·요청별·전송 직전 Header 적용 시점
+- 연결 오류 재시도(Handler별 끄기)와 전송 대기(IsReadyToSend)
 - HTTP 및 응답 오류 분류
 - API별 요청 병합
 - Handler 등록과 조회
@@ -20,9 +22,8 @@ Runtime의 책임:
 사용자 프로젝트의 책임:
 
 - API 요청·응답 모델
-- 인증과 공통 Header
-- 서버별 오류 정책
-- GET·PUT·PATCH·DELETE 등 추가 Method
+- 인증 흐름(토큰 발급·갱신·401 후 재전송)과 Header 값
+- 서버별 오류 정책과 오류 본문 해석
 - 프로젝트 서비스 또는 Singleton 구성
 - UI 및 도메인 로직
 
@@ -94,7 +95,7 @@ HttpBase/
 - `API` 프로퍼티를 override한다.
 - `RegisterHandler(instance)`로 등록한다.
 
-API 경로 중복이나 빈 경로를 조용히 무시하지 않는다.
+등록 키는 Method와 API 경로다(POST는 경로만). 같은 키의 중복이나 빈 경로를 조용히 무시하지 않는다. Method를 지정하지 않은 Handler는 POST로 유지한다(하위 호환).
 
 ### Handler 상태
 
@@ -106,7 +107,8 @@ API 경로 중복이나 빈 경로를 조용히 무시하지 않는다.
 - API 경로
 - 패킷 번호
 - JSON Body
-- Callback
+- HTTP Method와 요청별 Header
+- Callback과 UserState
 - 재시도 횟수
 
 같은 Handler에서 요청이 연속으로 발생해도 메시지와 콜백이 서로 덮어쓰이지 않아야 한다.
@@ -145,12 +147,19 @@ Coroutine을 추가할 때 중단될 경우 보유 중인 RequestInfo와 UnityWe
 
 ### HTTP 결과
 
-- `ConnectionError`만 자동 재시도한다.
-- HTTP 4xx와 5xx는 `ErrorProcess()`에 상태 코드를 전달한다.
-- 전체 2xx 범위를 성공으로 취급한다.
-- `DataProcessingError`와 빈 성공 응답은 내부 오류 코드 `-1`로 처리한다.
+- `ConnectionError`만 자동 재시도하고, `IRequestPolicy.RetryOnConnectionError`가 false인 Handler는 재시도하지 않는다.
+- 재시도를 소진하거나 재시도하지 않는 연결 오류는 `ErrorProcess(HttpErrorCodes.ConnectionFailed)`로 알린다.
+- HTTP 4xx와 5xx는 `ErrorProcess()`에 상태 코드를 전달한다. 본문이 JSON이 아니어도 예외 없이 전달한다.
+- 전체 2xx 범위를 성공으로 취급한다. 204·205는 본문 없는 성공이다.
+- `DataProcessingError`, 응답 변환 예외와 그 밖의 빈 성공 응답(`AllowEmptyResponse` false)은 `HttpErrorCodes.InvalidResponse`(-1)로 처리한다.
 - 응답의 `BaseResponse.ErrCode`가 0 또는 200이 아니면 `ErrorProcess()`를 호출한다.
 - HTTP 프로토콜 오류를 연결 장애처럼 재시도하지 않는다.
+- 모든 요청은 성공이든 실패든 결과(Process 또는 ErrorProcess)를 정확히 한 번 받는다. Dispose 때 남은 요청은 `HttpErrorCodes.Canceled`를 받는다.
+
+### Header
+
+- 적용 순서: Accept/Content-Type 기본값 → `DefaultHeaders` → 요청 생성 시 `AddRequestHeaders` → 전송 직전 `ApplyHeaders`(재시도마다 다시).
+- Header 값은 로그에 남기지 않는다. 비밀값 본문은 `LogRequestBody`·`LogRequestBodies`로 로그에서 뺀다.
 
 오류 정책을 변경하면 README와 테스트 사례도 함께 변경한다.
 
@@ -179,12 +188,9 @@ Coroutine을 추가할 때 중단될 경우 보유 중인 RequestInfo와 UnityWe
 
 ## 현재 제한 사항
 
-- 요청 Method는 JSON POST로 고정되어 있다.
-- 공통 Header와 인증 주입 API가 없다.
-- JsonUtility의 필드 기반 직렬화 제약을 가진다.
-- 빈 2xx 응답을 실패로 취급하므로 204 응답 API에는 적합하지 않다.
-- 요청별 취소 API가 없다.
-- 자동화된 Runtime 테스트가 아직 없다.
+- JsonUtility의 필드 기반 직렬화 제약을 가진다(Handler에서 교체 가능).
+- 이미 보낸 요청의 개별 취소 API가 없다.
+- PlayMode 테스트(`Tests/Runtime`)는 루프백 HTTP만 검증한다. IL2CPP·기기 검증은 사용하는 프로젝트에서 한다.
 - Debug 로그가 Runtime에 직접 포함되어 있다.
 
 이 제한을 해결할 때 서로 관련 없는 기능을 한 변경에 묶지 않는다.
@@ -203,8 +209,10 @@ Coroutine을 추가할 때 중단될 경우 보유 중인 RequestInfo와 UnityWe
 - JSON 요청 Body 생성
 - 최대 동시 요청 수 준수
 - 요청과 다른 순서로 응답 완료
-- HTTP 2xx 성공 처리
-- HTTP 4xx·5xx ErrorProcess 전달
+- HTTP 2xx 성공 처리, 204 본문 없는 성공
+- GET·PUT·DELETE Method와 본문 유무
+- 공통·요청별·전송 직전 Header 적용
+- HTTP 4xx·5xx ErrorProcess 전달(JSON이 아닌 본문 포함)
 - ConnectionError 재시도 횟수
 - 재시도 소진 후 RequestInfo 반환
 - 서로 다른 API 병합 대기의 독립성

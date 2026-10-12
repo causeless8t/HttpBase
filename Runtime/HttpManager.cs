@@ -11,7 +11,8 @@ namespace Causeless3t.Network
 {
     public sealed class HttpManager : MonoBehaviour, IDisposable
     {
-        private const int InvalidResponseError = -1;
+        private const int InvalidResponseError = HttpErrorCodes.InvalidResponse;
+        private const string JsonContentType = "application/json";
 
         private sealed class PendingCollapsibleRequest
         {
@@ -39,6 +40,22 @@ namespace Causeless3t.Network
             }
         }
 
+        /// <summary>Policy used for handlers that do not implement <see cref="IRequestPolicy"/> (2.0.0 behavior).</summary>
+        private sealed class DefaultRequestPolicy : IRequestPolicy
+        {
+            public static readonly DefaultRequestPolicy Instance = new();
+
+            public RequestMethod Method => RequestMethod.Post;
+            public bool RetryOnConnectionError => true;
+            public bool LogRequestBody => true;
+            public bool AllowEmptyResponse => false;
+            public bool IsReadyToSend(RequestInfo info) => true;
+
+            public void ApplyHeaders(RequestInfo info, IDictionary<string, string> headers)
+            {
+            }
+        }
+
         private readonly Dictionary<string, IRequestHandler> _requestHandlers = new();
         private readonly Queue<RequestInfo> _requestWaitingQueue = new();
 
@@ -51,11 +68,24 @@ namespace Causeless3t.Network
         private readonly Dictionary<RequestInfo, UnityWebRequest>
             _activeWebRequests = new();
 
+        private readonly Dictionary<string, string> _sendHeaders =
+            new(StringComparer.OrdinalIgnoreCase);
+
         private HttpManagerOptions _options;
         private bool _isInitialized;
 
         private int _packetNumber;
         public int PacketNumber => _packetNumber;
+
+        /// <summary>True between <see cref="Initialize"/> and <see cref="Dispose"/>.</summary>
+        public bool IsInitialized => _isInitialized;
+
+        /// <summary>Options passed to <see cref="Initialize"/>. Null when not initialized.</summary>
+        public HttpManagerOptions Options => _options;
+
+        /// <summary>Number of requests waiting, in progress or waiting for a retry.</summary>
+        public int PendingRequestCount =>
+            _requestWaitingQueue.Count + _inProgressRequests.Count + _retryingRequests.Count;
 
         public void Initialize(
             HttpManagerOptions options,
@@ -97,6 +127,18 @@ namespace Causeless3t.Network
             IRequest request,
             Action<RequestInfo, string> callback = null)
         {
+            EnqueuePacket(handler, request, callback, null);
+        }
+
+        /// <summary>
+        /// Enqueues a request with caller state stored in <see cref="RequestInfo.UserState"/>.
+        /// </summary>
+        public void EnqueuePacket(
+            IRequestHandler handler,
+            IRequest request,
+            Action<RequestInfo, string> callback,
+            object userState)
+        {
             ThrowIfNotInitialized();
 
             if (handler == null)
@@ -105,8 +147,9 @@ namespace Causeless3t.Network
             if (request == null)
                 throw new ArgumentNullException(nameof(request));
 
-            _requestWaitingQueue.Enqueue(
-                handler.CreateRequest(_packetNumber++, request, callback));
+            var info = handler.CreateRequest(_packetNumber++, request, callback);
+            info.SetUserState(userState);
+            _requestWaitingQueue.Enqueue(info);
         }
 
         public void EnqueueBundlePacket(
@@ -122,8 +165,10 @@ namespace Causeless3t.Network
             if (request == null)
                 throw new ArgumentNullException(nameof(request));
 
+            var key = GetHandlerKey(handler);
+
             if (_pendingCollapsibleRequests.TryGetValue(
-                    handler.API,
+                    key,
                     out var pendingRequest))
             {
                 if (pendingRequest.Request.Equals(request))
@@ -132,7 +177,7 @@ namespace Causeless3t.Network
                     return;
                 }
 
-                FlushPendingBundle(handler.API, pendingRequest);
+                FlushPendingBundle(key, pendingRequest);
             }
 
             var newPendingRequest = new PendingCollapsibleRequest(
@@ -141,17 +186,17 @@ namespace Causeless3t.Network
                 callback);
 
             _pendingCollapsibleRequests.Add(
-                handler.API,
+                key,
                 newPendingRequest);
 
             newPendingRequest.DelayCoroutine = StartCoroutine(
                 DelayedSendBundlePacket(
-                    handler.API,
+                    key,
                     newPendingRequest));
         }
 
         private IEnumerator DelayedSendBundlePacket(
-            string api,
+            string key,
             PendingCollapsibleRequest pendingRequest)
         {
             yield return new WaitForSecondsRealtime(
@@ -159,31 +204,31 @@ namespace Causeless3t.Network
 
             if (!_isInitialized ||
                 !_pendingCollapsibleRequests.TryGetValue(
-                    api,
+                    key,
                     out var currentRequest) ||
                 !ReferenceEquals(currentRequest, pendingRequest))
             {
                 yield break;
             }
 
-            _pendingCollapsibleRequests.Remove(api);
+            _pendingCollapsibleRequests.Remove(key);
             pendingRequest.DelayCoroutine = null;
             QueueBundleRequest(pendingRequest);
         }
 
         private void FlushPendingBundle(
-            string api,
+            string key,
             PendingCollapsibleRequest pendingRequest)
         {
             if (!_pendingCollapsibleRequests.TryGetValue(
-                    api,
+                    key,
                     out var currentRequest) ||
                 !ReferenceEquals(currentRequest, pendingRequest))
             {
                 return;
             }
 
-            _pendingCollapsibleRequests.Remove(api);
+            _pendingCollapsibleRequests.Remove(key);
 
             if (pendingRequest.DelayCoroutine != null)
             {
@@ -247,6 +292,10 @@ namespace Causeless3t.Network
             return handlerTypes.Length;
         }
 
+        /// <summary>
+        /// Registers a handler instance. The registration key is the HTTP Method and API path, so
+        /// handlers with the same path and different methods can be registered together.
+        /// </summary>
         public void RegisterHandler(IRequestHandler handler)
         {
             ThrowIfNotInitialized();
@@ -260,30 +309,73 @@ namespace Causeless3t.Network
                     $"{handler.GetType().FullName} does not define a valid API path.");
             }
 
+            var key = GetHandlerKey(handler);
+
             if (_requestHandlers.TryGetValue(
-                    handler.API,
+                    key,
                     out var registeredHandler))
             {
                 throw new InvalidOperationException(
-                    $"The API path '{handler.API}' is already registered by " +
+                    $"The API '{key}' is already registered by " +
                     $"{registeredHandler.GetType().FullName}.");
             }
 
             if (handler is IHttpManagerAware managerAware)
                 managerAware.Bind(this);
 
-            _requestHandlers.Add(handler.API, handler);
+            _requestHandlers.Add(key, handler);
 
             Debug.Log(
-                $"Registered HTTP Handler: {handler.API} -> " +
+                $"Registered HTTP Handler: {key} -> " +
                 $"{handler.GetType().FullName}");
         }
 
+        /// <summary>
+        /// Returns the handler for a path. Prefers the POST handler (2.0.0 behavior), otherwise the only
+        /// handler registered for the path.
+        /// </summary>
         public IRequestHandler GetHandler(string api)
         {
-            if (!_requestHandlers.TryGetValue(api, out var handler))
+            if (!string.IsNullOrEmpty(api) &&
+                _requestHandlers.TryGetValue(
+                    MakeHandlerKey(RequestMethod.Post, api),
+                    out var postHandler))
             {
+                return postHandler;
+            }
+
+            IRequestHandler found = null;
+            foreach (var handler in _requestHandlers.Values)
+            {
+                if (handler.API != api)
+                    continue;
+
+                if (found != null)
+                {
+                    Debug.LogErrorFormat(
+                        "{0} has handlers for several methods. Use GetHandler(api, method).",
+                        api);
+                    return null;
+                }
+
+                found = handler;
+            }
+
+            if (found == null)
                 Debug.LogErrorFormat("{0} doesn't exist recv handler !!", api);
+
+            return found;
+        }
+
+        public IRequestHandler GetHandler(string api, RequestMethod method)
+        {
+            if (!_requestHandlers.TryGetValue(
+                    MakeHandlerKey(method, api),
+                    out var handler))
+            {
+                Debug.LogErrorFormat(
+                    "{0} doesn't exist recv handler !!",
+                    MakeHandlerKey(method, api));
                 return null;
             }
 
@@ -295,39 +387,156 @@ namespace Causeless3t.Network
             return _requestHandlers.Values.OfType<T>().FirstOrDefault();
         }
 
+        private static IRequestPolicy GetPolicy(IRequestHandler handler)
+        {
+            return handler as IRequestPolicy ?? DefaultRequestPolicy.Instance;
+        }
+
+        private static string GetHandlerKey(IRequestHandler handler)
+        {
+            return MakeHandlerKey(GetPolicy(handler).Method, handler.API);
+        }
+
+        private static string MakeHandlerKey(RequestMethod method, string api)
+        {
+            // POST keeps the bare path so 2.0.0 keys and log lines stay the same.
+            return method == RequestMethod.Post
+                ? api
+                : $"{method.ToHttpMethod()} {api}";
+        }
+
         private void Update()
         {
             if (!_isInitialized)
                 return;
 
-            while (_requestWaitingQueue.Count > 0 &&
+            // Each waiting request is looked at once per frame. Requests whose handler is not ready
+            // (for example while a token is refreshed) go back to the end of the queue.
+            var count = _requestWaitingQueue.Count;
+
+            while (count-- > 0 &&
+                   _isInitialized &&
+                   _requestWaitingQueue.Count > 0 &&
                    _inProgressRequests.Count <
                    _options.MaxConcurrentRequests)
             {
                 var request = _requestWaitingQueue.Dequeue();
+
+                if (!IsReadyToSend(request))
+                {
+                    _requestWaitingQueue.Enqueue(request);
+                    continue;
+                }
+
+                // Registered before the coroutine starts so the concurrency limit sees it this frame.
+                request.State = RequestInfo.eRequestState.InProgress;
+                _inProgressRequests.Add(request);
                 StartCoroutine(SendPacket(request));
+            }
+        }
+
+        private bool IsReadyToSend(RequestInfo info)
+        {
+            var handler = info.Handler;
+            if (handler == null)
+                return true;
+
+            try
+            {
+                return GetPolicy(handler).IsReadyToSend(info);
+            }
+            catch (Exception exception)
+            {
+                Debug.LogException(exception);
+                return true;
+            }
+        }
+
+        private UnityWebRequest CreateWebRequest(
+            RequestInfo info,
+            IRequestPolicy policy)
+        {
+            var method = info.Method;
+            var www = new UnityWebRequest(
+                _options.BuildUrl(info.Protocol),
+                method.ToHttpMethod());
+
+            try
+            {
+                var hasBody = method.HasRequestBody();
+
+                if (hasBody)
+                {
+                    var bytes = new System.Text.UTF8Encoding()
+                        .GetBytes(info.Body ?? string.Empty);
+
+                    www.uploadHandler = new UploadHandlerRaw(bytes)
+                    {
+                        contentType = JsonContentType
+                    };
+                }
+
+                www.downloadHandler = new DownloadHandlerBuffer();
+                www.useHttpContinue = false;
+                www.timeout = _options.TimeoutSeconds;
+
+                // Order: defaults, then per-request headers, then send-time headers (each may override).
+                _sendHeaders.Clear();
+                _sendHeaders["Accept"] = JsonContentType;
+
+                if (hasBody)
+                    _sendHeaders["Content-Type"] = JsonContentType;
+
+                foreach (var header in _options.DefaultHeaders)
+                    _sendHeaders[header.Key] = header.Value;
+
+                foreach (var header in info.Headers)
+                    _sendHeaders[header.Key] = header.Value;
+
+                policy.ApplyHeaders(info, _sendHeaders);
+
+                foreach (var header in _sendHeaders)
+                {
+                    RequestInfo.ValidateHeader(header.Key, header.Value);
+                    www.SetRequestHeader(header.Key, header.Value);
+                }
+
+                _sendHeaders.Clear();
+                return www;
+            }
+            catch
+            {
+                _sendHeaders.Clear();
+                www.Dispose();
+                throw;
             }
         }
 
         private IEnumerator SendPacket(RequestInfo info)
         {
-            var formData = new WWWForm();
-            var bytes =
-                new System.Text.UTF8Encoding().GetBytes(info.Body);
+            var policy = GetPolicy(info.Handler);
+            UnityWebRequest www;
 
-            var www = UnityWebRequest.Post(
-                _options.BuildUrl(info.Protocol),
-                formData);
+            try
+            {
+                www = CreateWebRequest(info, policy);
+            }
+            catch (Exception exception)
+            {
+                Debug.LogException(exception);
+                FailRequest(
+                    info,
+                    $"{info.Protocol} request could not be created.",
+                    InvalidResponseError);
+                yield break;
+            }
 
-            www.uploadHandler = new UploadHandlerRaw(bytes);
-            www.downloadHandler = new DownloadHandlerBuffer();
-            // www.SetRequestHeader("Content-Type", "application/json");
-            // www.SetRequestHeader("Authorization", $"Bearer {SessionKey}");
-            www.useHttpContinue = false;
-            www.timeout = _options.TimeoutSeconds;
+            if (_options.LogRequestBodies && policy.LogRequestBody)
+            {
+                Debug.Log(
+                    $"<color=yellow>Req {info.Method.ToHttpMethod()} {info.Protocol} >> {info.Body}</color>");
+            }
 
-            info.State = RequestInfo.eRequestState.InProgress;
-            _inProgressRequests.Add(info);
             _activeWebRequests.Add(info, www);
 
             var elapsedTime = Time.realtimeSinceStartup;
@@ -343,25 +552,44 @@ namespace Causeless3t.Network
                     UnityWebRequest.Result.ConnectionError)
                 {
                     var error = www.error;
+                    info.SetResponse(0, null, null, error);
 
                     if (Application.internetReachability ==
                         NetworkReachability.NotReachable)
                     {
                         Debug.LogErrorFormat(
-                            "network is not reachable !! {0}",
+                            "network is not reachable !! {0} {1}",
+                            info.Protocol,
                             error);
                     }
                     else
                     {
                         Debug.LogErrorFormat(
-                            "connection error in {0}sec !! {1}",
+                            "connection error in {0}sec !! {1} {2}",
                             Time.realtimeSinceStartup - elapsedTime,
+                            info.Protocol,
                             error);
+                    }
+
+                    if (!policy.RetryOnConnectionError)
+                    {
+                        FailRequest(
+                            info,
+                            $"{info.Protocol} failed with a connection error and is not retried.",
+                            HttpErrorCodes.ConnectionFailed);
+                        yield break;
                     }
 
                     StartCoroutine(RetryProcess(error, info));
                     yield break;
                 }
+
+                var recv = www.downloadHandler?.text ?? string.Empty;
+                info.SetResponse(
+                    www.responseCode,
+                    recv,
+                    www.GetResponseHeaders(),
+                    www.error);
 
                 if (www.result ==
                     UnityWebRequest.Result.DataProcessingError)
@@ -386,7 +614,6 @@ namespace Causeless3t.Network
                     yield break;
                 }
 
-                var recv = www.downloadHandler.text;
                 var handler = info.Handler;
 
                 if (handler == null &&
@@ -404,7 +631,9 @@ namespace Causeless3t.Network
 
                 if (www.result ==
                         UnityWebRequest.Result.Success &&
-                    string.IsNullOrEmpty(recv))
+                    string.IsNullOrEmpty(recv) &&
+                    !IsNoContentStatusCode(httpStatusCode) &&
+                    !policy.AllowEmptyResponse)
                 {
                     FailRequest(
                         info,
@@ -432,6 +661,9 @@ namespace Causeless3t.Network
                         $"{handlerName}에서 {info.Protocol} 응답을 처리하는데 실패했습니다.");
 
                     Debug.LogError($"{exception}");
+
+                    // The caller still gets exactly one result for the request.
+                    NotifyError(info, null, InvalidResponseError);
                 }
                 finally
                 {
@@ -451,10 +683,7 @@ namespace Causeless3t.Network
             HttpStatusCode responseCode,
             string recvString)
         {
-            BaseResponse baseResponse = null;
-
-            if (!string.IsNullOrEmpty(recvString))
-                baseResponse = JsonUtility.FromJson<BaseResponse>(recvString);
+            var baseResponse = TryParseBaseResponse(recvString);
 
             if (handler == null)
             {
@@ -480,10 +709,39 @@ namespace Causeless3t.Network
             handler.Parse(info, recvString);
         }
 
+        /// <summary>
+        /// Reads <see cref="BaseResponse.ErrCode"/> when the body is a JSON object. Bodies that are not JSON
+        /// (for example an HTML error page from a proxy) give null instead of an exception.
+        /// </summary>
+        private static BaseResponse TryParseBaseResponse(string recvString)
+        {
+            if (string.IsNullOrEmpty(recvString))
+                return null;
+
+            var trimmed = recvString.TrimStart();
+            if (trimmed.Length == 0 || trimmed[0] != '{')
+                return null;
+
+            try
+            {
+                return JsonUtility.FromJson<BaseResponse>(recvString);
+            }
+            catch (ArgumentException)
+            {
+                return null;
+            }
+        }
+
         private static bool IsSuccessStatusCode(HttpStatusCode responseCode)
         {
             var statusCode = (int)responseCode;
             return statusCode >= 200 && statusCode <= 299;
+        }
+
+        private static bool IsNoContentStatusCode(HttpStatusCode responseCode)
+        {
+            return responseCode == HttpStatusCode.NoContent ||
+                   responseCode == HttpStatusCode.ResetContent;
         }
 
         private void FailRequest(
@@ -495,7 +753,22 @@ namespace Causeless3t.Network
 
             try
             {
-                info.Handler?.ErrorProcess(info, null, errorCode);
+                NotifyError(info, null, errorCode);
+            }
+            finally
+            {
+                CompleteRequest(info);
+            }
+        }
+
+        private static void NotifyError(
+            RequestInfo info,
+            BaseResponse response,
+            int errorCode)
+        {
+            try
+            {
+                info.Handler?.ErrorProcess(info, response, errorCode);
             }
             catch (Exception exception)
             {
@@ -503,10 +776,6 @@ namespace Causeless3t.Network
                     $"{info.Protocol} 오류 처리 중 예외가 발생했습니다.");
 
                 Debug.LogError($"{exception}");
-            }
-            finally
-            {
-                CompleteRequest(info);
             }
         }
 
@@ -520,8 +789,10 @@ namespace Causeless3t.Network
                     _packetNumber,
                     _options.MaxRetryAttempts))
             {
-                Debug.LogError(error);
-                CompleteRequest(info);
+                FailRequest(
+                    info,
+                    $"{info.Protocol} failed after {info.RetryCount} retries: {error}",
+                    HttpErrorCodes.ConnectionFailed);
                 yield break;
             }
 
@@ -566,6 +837,11 @@ namespace Causeless3t.Network
             }
         }
 
+        /// <summary>
+        /// Aborts active requests and completes every waiting, in-progress and retrying request. Each of
+        /// them receives <see cref="HttpErrorCodes.Canceled"/> through ErrorProcess before it is released,
+        /// so callers waiting for a result are not left waiting.
+        /// </summary>
         public void Dispose()
         {
             _isInitialized = false;
@@ -587,21 +863,26 @@ namespace Causeless3t.Network
             _activeWebRequests.Clear();
             _pendingCollapsibleRequests.Clear();
 
+            var remaining = new List<RequestInfo>(
+                _requestWaitingQueue.Count +
+                _inProgressRequests.Count +
+                _retryingRequests.Count);
+
             while (_requestWaitingQueue.TryDequeue(
                        out var waitingRequest))
             {
-                CompleteRequest(waitingRequest);
+                remaining.Add(waitingRequest);
             }
 
-            foreach (var request in
-                     _inProgressRequests.ToArray())
-            {
-                CompleteRequest(request);
-            }
+            remaining.AddRange(_inProgressRequests);
+            remaining.AddRange(_retryingRequests);
+            _inProgressRequests.Clear();
+            _retryingRequests.Clear();
 
-            foreach (var request in
-                     _retryingRequests.ToArray())
+            foreach (var request in remaining)
             {
+                request.SetResponse(0, null, null, "The HttpManager was disposed.");
+                NotifyError(request, null, HttpErrorCodes.Canceled);
                 CompleteRequest(request);
             }
 

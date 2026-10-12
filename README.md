@@ -6,7 +6,11 @@ Unity 프로젝트에서 핸들러 기반 JSON HTTP 요청을 구성하기 위�
 
 ## 주요 기능
 
-- `UnityWebRequest` 기반 JSON POST 요청
+- `UnityWebRequest` 기반 JSON 요청(GET, POST, PUT, DELETE, PATCH)
+- 공통 헤더, 요청별 헤더, 전송 직전 헤더(인증 토큰 등)
+- 204·205 No Content 응답 처리
+- 핸들러별 연결 오류 재시도 여부와 전송 대기(토큰 갱신 중 대기 등)
+- 요청별 호출자 상태(`UserState`)로 결과 전달
 - 핸들러 어셈블리 자동 등록 및 인스턴스 수동 등록
 - 최대 동시 요청 수 제한
 - 연결 오류 재시도
@@ -33,7 +37,7 @@ https://github.com/causeless8t/HttpBase.git
 특정 버전을 고정하려면 Git 태그를 사용합니다.
 
 ```text
-https://github.com/causeless8t/HttpBase.git#2.0.0
+https://github.com/causeless8t/HttpBase.git#2.1.0
 ```
 
 또는 `Packages/manifest.json`에 추가합니다.
@@ -41,7 +45,7 @@ https://github.com/causeless8t/HttpBase.git#2.0.0
 ```json
 {
   "dependencies": {
-    "com.causeless3t.httpbase": "https://github.com/causeless8t/HttpBase.git#2.0.0"
+    "com.causeless3t.httpbase": "https://github.com/causeless8t/HttpBase.git#2.1.0"
   }
 }
 ```
@@ -203,21 +207,83 @@ _httpManager.RegisterHandler(
 | `MaxRetryAttempts` | 3 | 최초 요청을 제외한 연결 오류 재시도 횟수 |
 | `RetryDelaySeconds` | 2 | 재시도 대기 시간 |
 | `BundleDelaySeconds` | 5 | 병합 요청을 모으는 시간 |
+| `DefaultHeaders` | 없음 | 모든 요청에 붙는 공통 헤더(생성 시 복사) |
+| `LogRequestBodies` | true | 요청 본문 로그 허용. 헤더는 로그에 남기지 않음 |
 
 설정 객체는 생성 이후 변경할 수 없습니다. URL은 기본 URL의 마지막 `/`와 API 경로의 첫 `/`를 정규화해 조합합니다.
+
+## HTTP Method
+
+`[API]`의 `Method` 속성이나 `Method` override로 지정합니다. 지정하지 않은 핸들러는 2.0.0과 같이 POST입니다.
+
+```csharp
+[API("api/v1/user-data", Method = RequestMethod.Get)]
+public sealed class GetUserDataHandler : RequestHandler<EmptyRequest, UserDataResponse>
+{
+    ...
+}
+```
+
+- POST, PUT, PATCH는 요청 객체를 JSON 본문으로 보내고 GET, DELETE는 본문 없이 보냅니다.
+- 등록 키는 Method와 경로입니다. 같은 경로의 GET·PUT 핸들러를 함께 등록할 수 있습니다. `GetHandler(api)`는 POST 핸들러를 우선하고, 없으면 그 경로의 유일한 핸들러를 돌려줍니다. 여러 개면 `GetHandler(api, method)`를 사용합니다.
+- 본문 형식을 바꾸려면 `SerializeRequest()`, 응답 변환을 바꾸려면 `DeserializeResponse()`를 override합니다.
+
+## 헤더
+
+모든 요청에 `Accept: application/json`, 본문이 있는 요청에 `Content-Type: application/json`을 붙입니다. 이어서 다음 순서로 적용하며 뒤의 값이 앞의 값을 덮어씁니다.
+
+| 순서 | 위치 | 적용 시점 | 용도 |
+| --- | --- | --- | --- |
+| 1 | `HttpManagerOptions.DefaultHeaders` | 전송 직전 | 앱 버전 등 공통 값 |
+| 2 | `AddRequestHeaders(request, ref headers)` | 요청 생성 시 고정 | 요청마다 다른 값 |
+| 3 | `ApplyHeaders(info, headers)` | 전송 직전(재시도마다 다시) | `Authorization: Bearer` 등 바뀔 수 있는 값 |
+
+인증 헤더는 `ApplyHeaders()`에서 넣으므로 재시도 전송에도 그 시점의 토큰을 씁니다. 토큰을 갱신하는 동안 `IsReadyToSend()`가 false를 돌려주면 요청은 재시도 횟수를 쓰지 않고 대기열에 남습니다.
+
+```csharp
+public sealed class ProfileHandler : RequestHandler<EmptyRequest, ProfileResponse>
+{
+    private readonly ITokenSource _tokens;
+
+    public ProfileHandler(ITokenSource tokens) => _tokens = tokens;
+
+    public override string API => "api/v1/me";
+    public override RequestMethod Method => RequestMethod.Get;
+
+    protected override bool IsReadyToSend(RequestInfo info) => !_tokens.IsRefreshing;
+
+    protected override void ApplyHeaders(RequestInfo info, IDictionary<string, string> headers)
+    {
+        headers["Authorization"] = "Bearer " + _tokens.AccessToken;
+    }
+
+    protected override EmptyRequest MakeReqMessage() => new();
+    protected override void Process(RequestInfo info, ProfileResponse response) { }
+}
+```
+
+## 요청별 결과 전달
+
+핸들러 인스턴스에는 요청별 콜백을 두지 않습니다. 호출자의 결과 대기 객체는 `EnqueueRequestWithState(param, state)`로 넘기고 `Process()`·`ErrorProcess()`에서 `requestInfo.UserState`로 꺼냅니다. 오류 처리에서는 `requestInfo.ResponseCode`, `ResponseText`, `GetResponseHeader()`로 상태 코드, 오류 본문, `Retry-After` 등을 읽을 수 있습니다. 이 값은 요청이 풀로 반환되기 전까지만 유효합니다.
 
 ## 오류 및 재시도 정책
 
 | 결과 | 처리 |
 | --- | --- |
-| `ConnectionError` | 설정된 횟수만큼 재시도 |
-| HTTP 4xx·5xx | `ErrorProcess()`에 HTTP 상태 코드 전달 |
+| `ConnectionError`(시간 초과 포함) | `RetryOnConnectionError`가 true면 설정된 횟수만큼 재시도, 소진되거나 false면 `ErrorProcess(HttpErrorCodes.ConnectionFailed)` |
+| HTTP 4xx·5xx | 재시도 없이 `ErrorProcess()`에 HTTP 상태 코드 전달(401·409 포함) |
 | 응답의 `ErrCode != 0, 200` | `ErrorProcess()`에 ErrCode 전달 |
-| `DataProcessingError` | 재시도 없이 `-1` 전달 |
-| 비어 있는 성공 응답 | 재시도 없이 `-1` 전달 |
+| `DataProcessingError`, 응답 변환 예외 | 재시도 없이 `HttpErrorCodes.InvalidResponse`(-1) 전달 |
+| 204·205 | 본문 없는 성공(`Process()`에 기본값 응답) |
+| 그 밖의 빈 2xx | `AllowEmptyResponse`가 false(기본)면 -1, true면 성공 |
+| 매니저 종료·재초기화 | 남은 요청마다 `HttpErrorCodes.Canceled` 전달 후 반환 |
 | HTTP 2xx | 성공 응답 파싱 |
 
-HTTP 오류 응답은 연결 장애로 간주하여 재시도하지 않습니다. 재시도 중에도 같은 `RequestInfo`와 요청 본문을 유지하며 패킷 번호만 새로 발급합니다.
+HTTP 오류 응답은 연결 장애로 간주하여 재시도하지 않습니다. 본문이 JSON이 아닌 오류 응답(프록시의 HTML 오류 등)도 예외 없이 `ErrorProcess()`로 전달합니다. 재시도 중에도 같은 `RequestInfo`와 요청 본문을 유지하며 패킷 번호만 새로 발급합니다.
+
+서버가 같은 요청을 두 번 처리하면 안 되는 API(멱등성이 보장되지 않는 저장 등)는 `RetryOnConnectionError`를 false로 두고, 응답을 받지 못한 경우의 확인 방법을 서버 계약에 맞춰 호출하는 쪽에서 처리합니다. 401 후 토큰 갱신과 한 번의 재전송 같은 인증 정책도 사용하는 프로젝트에서 구현합니다.
+
+비밀값을 보내는 핸들러는 `LogRequestBody`를 false로 두거나 `HttpManagerOptions.LogRequestBodies`를 false로 설정합니다.
 
 ## 병합 요청
 
@@ -257,7 +323,7 @@ public sealed class SaveProgressRequest :
 
 - 실행 중인 UnityWebRequest 중단
 - 모든 요청 및 지연 코루틴 종료
-- 대기·진행·재시도 중인 RequestInfo 풀 반환
+- 대기·진행·재시도 중인 요청에 `ErrorProcess(HttpErrorCodes.Canceled)` 전달 후 RequestInfo 풀 반환
 - 병합 요청과 핸들러 등록 정보 제거
 
 매니저가 비활성화된 동안에는 코루틴을 시작할 수 없으므로 요청을 보내기 전에 활성 상태인지 확인해야 합니다.
@@ -280,21 +346,29 @@ Package Manager에서 **Basic Request** 샘플을 가져올 수 있습니다.
 
 현재 런타임은 다음 범위를 대상으로 합니다.
 
-- JSON POST
-- `JsonUtility` 직렬화
-- 핸들러 기반 응답 처리
-- 연결 오류 재시도
+- JSON 요청(GET, POST, PUT, DELETE, PATCH)
+- `JsonUtility` 직렬화(핸들러에서 교체 가능)
+- 핸들러 기반 응답 처리와 요청별 호출자 상태
+- 공통·요청별·전송 직전 헤더
+- 연결 오류 재시도(핸들러별 끄기)
 - 단순 동시 요청 제한과 요청 병합
 
 다음 기능은 사용하는 프로젝트에서 확장해야 합니다.
 
-- GET, PUT, PATCH, DELETE
-- 인증 헤더와 공통 헤더
+- 인증 흐름(토큰 발급·갱신·401 재전송)
 - 파일 업로드 및 다운로드
 - 다른 JSON 직렬화 도구
 - 지수 백오프와 상태 코드별 재시도 정책
-- 요청별 취소와 진행률
+- 이미 보낸 요청의 개별 취소와 진행률
 - 캐시 및 오프라인 큐
+
+## 테스트
+
+`Tests/Runtime`에 루프백 HTTP 서버를 쓰는 PlayMode 테스트가 있습니다. 사용하는 프로젝트의 `Packages/manifest.json`에 다음을 추가하고 Test Runner의 PlayMode에서 실행합니다.
+
+```json
+"testables": ["com.causeless3t.httpbase"]
+```
 
 ## 프로젝트 구조
 
@@ -302,12 +376,16 @@ Package Manager에서 **Basic Request** 샘플을 가져올 수 있습니다.
 HttpBase/
 ├── Runtime/
 │   ├── Causeless3t.HttpBase.asmdef
+│   ├── HttpErrorCodes.cs
 │   ├── HttpManager.cs
 │   ├── HttpManagerOptions.cs
 │   ├── IRequestHandler.cs
-│   └── RequestInfo.cs
+│   ├── RequestInfo.cs
+│   └── RequestMethod.cs
 ├── Samples~/
 │   └── BasicRequest/
+├── Tests/
+│   └── Runtime/
 ├── CHANGELOG.md
 ├── LICENSE
 ├── README.md
